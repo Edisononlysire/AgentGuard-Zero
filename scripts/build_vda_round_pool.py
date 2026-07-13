@@ -34,6 +34,7 @@ from agentguard_zero.training.coevolution import (
     utc_now,
 )
 from agentguard_zero.training.vda_dataset import scenario_to_training_row
+from agentguard_zero.schemas.scenario_schema_v2 import paired_counterpart_v2, validate_pair_v2
 from generate_level1_frontier import compute_cfc_metrics
 
 
@@ -91,6 +92,31 @@ def _split_stratified(
         for task_id in TASK_IDS:
             required = quota[task_id]
             available = by_task.get(task_id, [])
+            if task_id == "T2":
+                if required % 2:
+                    raise LineageError("T2 split quota must be even so paired branches stay together")
+                grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+                for item in available:
+                    grouped[str(item["scenario"].get("pair_id", ""))].append(item)
+                complete_pairs = [
+                    sorted(values, key=lambda row: str(row["scenario"].get("trajectory_type", "")))
+                    for values in grouped.values()
+                    if {str(row["scenario"].get("trajectory_type")) for row in values}
+                    == {"betrayal", "legitimate_change"}
+                ]
+                complete_pairs.sort(
+                    key=lambda values: max(float(row["cfc"].get("frontier_score", 0.0)) for row in values),
+                    reverse=True,
+                )
+                chosen = [row for pair in complete_pairs[: required // 2] for row in pair]
+                if len(chosen) < required:
+                    raise LineageError(
+                        f"task T2 has {len(complete_pairs)} complete pairs, split {split} requires {required // 2}"
+                    )
+                selected.extend(chosen)
+                chosen_ids = {id(row) for row in chosen}
+                by_task[task_id] = [row for row in available if id(row) not in chosen_ids]
+                continue
             if len(available) < required:
                 raise LineageError(
                     f"task {task_id} has {len(available)} eligible candidates, "
@@ -205,12 +231,17 @@ def main() -> None:
         round_index=target_round,
     )
     dca_manifest_sha = sha256_file(dca_manifest_path)
+    experiment_variant = str(
+        dca_manifest.get("training_config", {}).get("experiment_variant", "full")
+    )
     if pool.get("kind") != "dca_candidate_pool":
         raise LineageError("candidate input is not a dca_candidate_pool")
     if int(pool.get("source_dca_round", -1)) != target_round:
         raise LineageError("candidate pool DCA round does not match checkpoint")
     if pool.get("source_dca_checkpoint_manifest_sha256") != dca_manifest_sha:
         raise LineageError("candidate pool checkpoint hash does not match DCA manifest")
+    if str(pool.get("experiment_variant", "full")) != experiment_variant:
+        raise LineageError("candidate pool experiment variant does not match DCA manifest")
     if parse_utc(pool["created_at"]) < parse_utc(dca_manifest["created_at"]):
         raise LineageError("candidate pool predates DCA_{r+1} checkpoint")
 
@@ -235,6 +266,9 @@ def main() -> None:
             excluded["duplicate"] += 1
             continue
         metadata = scenario.get("metadata", {}) or {}
+        if str(metadata.get("experiment_variant", "full")) != experiment_variant:
+            excluded["wrong_experiment_variant"] += 1
+            continue
         if int(metadata.get("source_dca_round", -1)) != target_round:
             excluded["wrong_dca_round"] += 1
             continue
@@ -253,14 +287,46 @@ def main() -> None:
             excluded["not_hard_but_solvable"] += 1
             continue
         seen.add(fingerprint)
-        valid.append(
-            {
-                **record,
-                "scenario_fingerprint": fingerprint,
-                "task_id": _task_id(record, scenario),
-                "cfc": cfc,
-            }
-        )
+        base_item = {
+            **record,
+            "scenario_fingerprint": fingerprint,
+            "task_id": _task_id(record, scenario),
+            "cfc": cfc,
+        }
+        valid.append(base_item)
+        if base_item["task_id"] == "T2" and scenario.get("protocol_version") == "tmcd-v2":
+            counterpart = paired_counterpart_v2(scenario)
+            pair_ok, pair_reason = validate_pair_v2(scenario, counterpart)
+            counterpart_checks = full_check(counterpart)
+            counterpart_cfc = _safe_cfc_metrics(counterpart)
+            if not pair_ok or not counterpart_checks.get("all_ok", False) or counterpart_cfc is None:
+                excluded[f"invalid_t2_counterpart:{pair_reason}"] += 1
+            else:
+                counterpart_metadata = dict(counterpart.get("metadata", {}) or {})
+                counterpart_metadata.update(
+                    {
+                        "source_dca_round": target_round,
+                        "source_checkpoint_manifest_sha256": dca_manifest_sha,
+                        "derived_from_scenario_id": scenario.get("scenario_id"),
+                    }
+                )
+                counterpart["metadata"] = counterpart_metadata
+                counterpart_fingerprint = scenario_fingerprint(counterpart)
+                if counterpart_fingerprint in feedback or counterpart_fingerprint in seen:
+                    excluded["t2_counterpart_overlap"] += 1
+                    continue
+                seen.add(counterpart_fingerprint)
+                valid.append(
+                    {
+                        **record,
+                        "scenario": counterpart,
+                        "scenario_fingerprint": counterpart_fingerprint,
+                        "duplicate": False,
+                        "task_id": "T2",
+                        "cfc": counterpart_cfc,
+                        "derived_counterpart": True,
+                    }
+                )
 
     if len(valid) < requested:
         raise LineageError(
@@ -324,6 +390,8 @@ def main() -> None:
         "seed": args.seed,
         "backbone": backbone,
         "target_round": target_round,
+        "protocol_version": "tmcd-v2",
+        "experiment_variant": experiment_variant,
         "source_dca_checkpoint_manifest": str(dca_manifest_path),
         "source_dca_checkpoint_manifest_sha256": dca_manifest_sha,
         "source_dca_adapter_sha256": dca_manifest.get("adapter_sha256"),

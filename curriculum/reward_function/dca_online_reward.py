@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from agentguard_zero.env.checker import full_check, parse_scenario_json
 from agentguard_zero.rewards.dca_reward import compute_dca_reward
+from agentguard_zero.schemas.scenario_schema_v2 import public_prefix_hash
 from agentguard_zero.training.coevolution import scenario_fingerprint, utc_now
 
 
@@ -195,10 +196,13 @@ def compute_score(
                 "task_focus": str(extra.get("task_focus", "")),
                 "prompt_index": extra.get("index"),
                 "prompt_nonce": extra.get("prompt_nonce"),
+                "experiment_variant": str(extra.get("experiment_variant", "full")),
             }
         )
         if scenario:
             scenario["metadata"] = metadata
+            if scenario.get("protocol_version") == "tmcd-v2" and scenario.get("scenario_family") == "trust_betrayal":
+                scenario["prefix_hash"] = public_prefix_hash(scenario)
             fingerprint = scenario_fingerprint(scenario)
             scenario["scenario_id"] = (
                 f"FB-D{metadata['source_dca_round']}-V{metadata['source_vda_round']}-"

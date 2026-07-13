@@ -268,7 +268,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=str(ROOT))
     parser.add_argument("--backbone", choices=sorted(BACKBONE_ENV), required=True)
-    parser.add_argument("--artifact-scope", choices=["formal", "pilot"], default="formal")
+    parser.add_argument(
+        "--experiment-variant",
+        choices=["full", "append_only_memory"],
+        default="full",
+    )
+    parser.add_argument(
+        "--artifact-scope",
+        choices=["formal", "pilot", "tmcd_v2", "tmcd_v2_pilot"],
+        default="tmcd_v2",
+    )
     parser.add_argument("--model-path", default="")
     parser.add_argument("--source-round", type=int, required=True)
     parser.add_argument("--seed", type=int, default=20260709)
@@ -277,16 +286,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dca-feedback-candidates", type=int, default=4000)
     parser.add_argument("--dca-rollout-n", type=int, default=2)
-    parser.add_argument("--dca-batch-size", type=int, default=16)
-    parser.add_argument("--dca-steps", type=int, default=0)
+    parser.add_argument("--dca-batch-size", type=int, default=40)
+    parser.add_argument("--dca-steps", type=int, default=50)
     parser.add_argument("--vda-candidates", type=int, default=10000)
     parser.add_argument("--vda-train-size", type=int, default=2400)
     parser.add_argument("--vda-dev-size", type=int, default=400)
     parser.add_argument("--vda-xplay-size", type=int, default=800)
-    parser.add_argument("--vda-batch-size", type=int, default=16)
+    parser.add_argument("--vda-batch-size", type=int, default=32)
     parser.add_argument("--vda-rollout-n", type=int, default=1)
     parser.add_argument("--vda-max-turns", type=int, default=16)
-    parser.add_argument("--vda-steps", type=int, default=0)
+    parser.add_argument("--vda-steps", type=int, default=75)
     parser.add_argument("--candidate-batch-size", type=int, default=4)
     parser.add_argument("--feedback-port", type=int, default=0)
     return parser.parse_args()
@@ -306,6 +315,16 @@ def main() -> None:
         raise SystemExit("DCA prompt rows must be divisible by DCA batch size")
     if args.vda_train_size % args.vda_batch_size:
         raise SystemExit("VDA train size must be divisible by VDA batch size")
+    if args.dca_steps * args.dca_batch_size * args.dca_rollout_n != args.dca_feedback_candidates:
+        raise SystemExit(
+            "DCA max-step budget must consume exactly the isolated feedback pool: "
+            "dca_steps * dca_batch_size * rollout_n == dca_feedback_candidates"
+        )
+    if args.vda_steps * args.vda_batch_size != args.vda_train_size:
+        raise SystemExit(
+            "VDA max-step budget must consume exactly the train split once: "
+            "vda_steps * vda_batch_size == vda_train_size"
+        )
     if args.vda_max_turns <= 0:
         raise SystemExit("VDA max turns must be positive")
 
@@ -318,6 +337,7 @@ def main() -> None:
         backbone=args.backbone,
         source_round=args.source_round,
         artifact_scope=args.artifact_scope,
+        experiment_variant=args.experiment_variant,
     )
     layout.data_dir.mkdir(parents=True, exist_ok=True)
     state_path = layout.state_path
@@ -357,6 +377,7 @@ def main() -> None:
             "backbone": args.backbone,
             "source_round": args.source_round,
             "rollout_n": args.dca_rollout_n,
+            "experiment_variant": args.experiment_variant,
         }
         if stage_complete(state_path, stage):
             existing = (
@@ -380,6 +401,7 @@ def main() -> None:
                 seed=args.seed,
                 backbone=args.backbone,
                 source_round=args.source_round,
+                experiment_variant=args.experiment_variant,
             )
             prompt_manifest = {
                 "schema_version": 1,
@@ -447,13 +469,15 @@ def main() -> None:
                         "AGZ_VAL_FILE": str(prompt_path),
                         "AGZ_DCA_FEEDBACK_LOG": str(feedback_log_path),
                         "AGZ_RUN_NAME": (
-                            f"agz_{args.artifact_scope}_{args.backbone}_dca_r{target_round}"
+                            f"agz_{args.artifact_scope}_{args.experiment_variant}_{args.backbone}_dca_r{target_round}"
                         ),
                         "AGZ_CHECKPOINT_DIR": str(dca_checkpoint_root),
                         "AGZ_MAX_STEPS": str(target_steps),
                         "AGZ_RESUME_MODE": resume_mode,
                         "AGZ_RESUME_FROM_PATH": resume_path,
                         "AGZ_ALLOCATED_GPU_IDS": ",".join(gpu_ids),
+                        "AGZ_BACKBONE": args.backbone,
+                        "AGZ_EXPERIMENT_VARIANT": args.experiment_variant,
                         "AGZ_BATCH_SIZE": str(args.dca_batch_size),
                         "AGZ_PPO_MINI_BATCH_SIZE": str(args.dca_batch_size),
                         "AGZ_PPO_MICRO_BATCH_SIZE_PER_GPU": os.environ.get(
@@ -464,6 +488,7 @@ def main() -> None:
                         ),
                         "AGZ_ROLLOUT_N": str(args.dca_rollout_n),
                         "AGZ_SEED": str(args.seed),
+                        "AGZ_SAVE_FREQ": str(target_steps),
                         "AGZ_VDA_FEEDBACK_PORT_A": str(
                             args.feedback_port
                             or (31501 if args.backbone == "qwen3.5-4b" else 32501)
@@ -524,6 +549,8 @@ def main() -> None:
                 checkpoint_root=str(dca_checkpoint_root),
                 training_config={
                     "protocol": "dca_first_alternating",
+                    "tmcd_protocol_version": "tmcd-v2",
+                    "experiment_variant": args.experiment_variant,
                     "artifact_scope": args.artifact_scope,
                     "execution_host": execution_host,
                     "allocated_gpus": gpu_ids,
@@ -615,6 +642,8 @@ def main() -> None:
                             os.environ.get("AGZ_ROLLOUT_TOP_P", "1.0"),
                             "--top-k",
                             os.environ.get("AGZ_ROLLOUT_TOP_K", "0"),
+                            "--experiment-variant",
+                            args.experiment_variant,
                         ],
                         environment,
                     )
@@ -717,13 +746,15 @@ def main() -> None:
                         "AGZ_TRAIN_FILE": str(split_paths["train"]),
                         "AGZ_VAL_FILE": str(split_paths["dev"] if args.vda_dev_size else split_paths["train"]),
                         "AGZ_RUN_NAME": (
-                            f"agz_{args.artifact_scope}_{args.backbone}_vda_r{target_round}"
+                            f"agz_{args.artifact_scope}_{args.experiment_variant}_{args.backbone}_vda_r{target_round}"
                         ),
                         "AGZ_CHECKPOINT_DIR": str(vda_checkpoint_root),
                         "AGZ_MAX_STEPS": str(target_steps),
                         "AGZ_RESUME_MODE": resume_mode,
                         "AGZ_RESUME_FROM_PATH": resume_path,
                         "AGZ_CUDA_VISIBLE_DEVICES": ",".join(gpu_ids),
+                        "AGZ_BACKBONE": args.backbone,
+                        "AGZ_EXPERIMENT_VARIANT": args.experiment_variant,
                         "AGZ_N_GPUS_PER_NODE": str(len(gpu_ids)),
                         "AGZ_BATCH_SIZE": str(args.vda_batch_size),
                         "AGZ_PPO_MINI_BATCH_SIZE": str(args.vda_batch_size),
@@ -763,7 +794,7 @@ def main() -> None:
                         "AGZ_SEED": str(args.seed),
                         "AGZ_VAL_BEFORE_TRAIN": "False",
                         "AGZ_DATA_SHUFFLE": "false",
-                        "AGZ_SAVE_FREQ": os.environ.get("AGZ_SAVE_FREQ", "1"),
+                        "AGZ_SAVE_FREQ": str(target_steps),
                         "AGZ_TEST_FREQ": "0",
                     }
                 )
@@ -783,6 +814,8 @@ def main() -> None:
                 checkpoint_root=str(vda_checkpoint_root),
                 training_config={
                     "protocol": "dca_first_alternating",
+                    "tmcd_protocol_version": "tmcd-v2",
+                    "experiment_variant": args.experiment_variant,
                     "artifact_scope": args.artifact_scope,
                     "execution_host": execution_host,
                     "allocated_gpus": gpu_ids,
@@ -884,7 +917,7 @@ def main() -> None:
         if not stage_complete(state_path, stage):
             mark_stage(state_path, stage, "in_progress")
             reports: dict[str, Any] = {}
-            if args.artifact_scope == "formal" and args.source_round > 0:
+            if args.artifact_scope in {"formal", "tmcd_v2"} and args.source_round > 0:
                 reports = {
                     "dca": _prune_parent_recovery_checkpoint(dca_parent, dca_parent_path),
                     "vda": _prune_parent_recovery_checkpoint(vda_parent, vda_parent_path),
@@ -900,6 +933,7 @@ def main() -> None:
         "completed_at": utc_now(),
         "backbone": args.backbone,
         "artifact_scope": args.artifact_scope,
+        "experiment_variant": args.experiment_variant,
         "source_round": args.source_round,
         "target_round": target_round,
         "seed": args.seed,

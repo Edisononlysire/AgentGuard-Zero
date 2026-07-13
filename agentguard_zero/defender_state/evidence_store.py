@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+from typing import Any, Iterable
+
+from agentguard_zero.world.public_projector import assert_public
+
+
+def _stable_id(prefix: str, payload: Any) -> str:
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    return f"{prefix}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+class EvidenceStore:
+    """Public evidence ledger with availability time and minimal provenance lineage."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, dict[str, Any]] = {}
+        self._event_index: dict[str, str] = {}
+
+    def add_event(self, public_event: dict[str, Any], *, time: int) -> str:
+        assert_public(public_event)
+        event_id = str(public_event.get("event_id", f"event-{time}"))
+        source_id = str(public_event.get("source_id") or public_event.get("source") or "unknown")
+        evidence_id = _stable_id("ev", {"event_id": event_id, "time": time, "source": source_id})
+        record = {
+            "evidence_id": evidence_id,
+            "event_id": event_id,
+            "source_id": source_id,
+            "evidence_type": str(public_event.get("type", "event")),
+            "public_payload": copy.deepcopy(public_event),
+            "parent_evidence_ids": [],
+            "root_source_ids": [source_id],
+            "created_at": int(time),
+            "available_at": int(time),
+            "integrity_status": "valid",
+        }
+        self._records.setdefault(evidence_id, record)
+        self._event_index[event_id] = evidence_id
+        return evidence_id
+
+    def add_tool_result(
+        self,
+        public_result: dict[str, Any],
+        *,
+        time: int,
+        parent_evidence_ids: Iterable[str] = (),
+    ) -> str:
+        assert_public(public_result)
+        parents = sorted({str(item) for item in parent_evidence_ids if str(item) in self._records})
+        tool = str(public_result.get("tool", "Tool"))
+        source_id = str(public_result.get("verifier_id") or f"tool:{tool}")
+        roots = {source_id}
+        for parent in parents:
+            roots.update(str(item) for item in self._records[parent].get("root_source_ids", []))
+        evidence_id = _stable_id(
+            "tool",
+            {"tool": tool, "time": time, "parents": parents, "payload": public_result},
+        )
+        self._records[evidence_id] = {
+            "evidence_id": evidence_id,
+            "event_id": str(public_result.get("event_id", "")),
+            "source_id": source_id,
+            "evidence_type": f"{tool.lower()}_result",
+            "public_payload": copy.deepcopy(public_result),
+            "parent_evidence_ids": parents,
+            "root_source_ids": sorted(roots),
+            "created_at": int(time),
+            "available_at": int(time) + 1,
+            "integrity_status": "valid",
+        }
+        return evidence_id
+
+    def evidence_for_event(self, event_id: str) -> str | None:
+        return self._event_index.get(str(event_id))
+
+    def get(self, evidence_id: str, *, time: int | None = None) -> dict[str, Any] | None:
+        record = self._records.get(str(evidence_id))
+        if record is None:
+            return None
+        if time is not None and int(record["available_at"]) > int(time):
+            return None
+        return copy.deepcopy(record)
+
+    def validate_refs(self, evidence_ids: Iterable[str], *, time: int) -> tuple[bool, str]:
+        for evidence_id in evidence_ids or []:
+            record = self._records.get(str(evidence_id))
+            if record is None:
+                return False, f"unknown_evidence:{evidence_id}"
+            if record.get("integrity_status") != "valid":
+                return False, f"invalid_evidence:{evidence_id}"
+            if int(record.get("available_at", 0)) > int(time):
+                return False, f"evidence_not_yet_available:{evidence_id}"
+        return True, "ok"
+
+    def independent_count(self, evidence_ids: Iterable[str], *, time: int) -> int:
+        """Count evidence records whose provenance roots are pairwise disjoint."""
+        selected_roots: set[str] = set()
+        count = 0
+        records = [self.get(item, time=time) for item in sorted(set(evidence_ids or []))]
+        for record in (item for item in records if item is not None):
+            roots = set(str(item) for item in record.get("root_source_ids", []))
+            if roots and roots.isdisjoint(selected_roots):
+                selected_roots.update(roots)
+                count += 1
+        return count
+
+    def available_records(self, *, time: int) -> list[dict[str, Any]]:
+        return [
+            copy.deepcopy(record)
+            for _, record in sorted(self._records.items())
+            if int(record.get("available_at", 0)) <= int(time)
+            and record.get("integrity_status") == "valid"
+        ]
+
+    def public_snapshot(self, *, time: int, limit: int = 32) -> list[dict[str, Any]]:
+        rows = self.available_records(time=time)[-max(1, int(limit)) :]
+        for row in rows:
+            assert_public(row)
+        return rows
+

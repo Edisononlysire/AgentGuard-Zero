@@ -15,6 +15,7 @@ for path in [ROOT, os.path.abspath(os.path.join(ROOT, ".."))]:
 
 from agentguard_zero.env.scenario_instantiator import instantiate_scenario
 from agentguard_zero.schemas.action_schema import parse_action_json
+from agentguard_zero.schemas.action_schema_v4 import parse_action_json_v4
 
 
 HIGH_IMPACT_ACTIONS = {"Isolate", "Restore", "Remove"}
@@ -69,6 +70,8 @@ def _verified_suspicious_event(action_packet: Dict[str, Any], suspicious_ids: se
 
 
 def score_vda_prediction(predict: str, scenario: Dict[str, Any]) -> Dict[str, float]:
+    if scenario.get("protocol_version") == "tmcd-v2":
+        return score_vda_prediction_v2_fallback(predict)
     env = instantiate_scenario(scenario)
     fake_ids = _initial_fake_ids(env)
     suspicious_ids = _initial_high_spoof_ids(env)
@@ -149,6 +152,38 @@ def score_vda_prediction(predict: str, scenario: Dict[str, Any]) -> Dict[str, fl
         "profile_poisoning": -fake_confirmed,
         "verification_cost": -verification_cost,
         "invalid": -invalid_penalty,
+    }
+
+
+def score_vda_prediction_v2_fallback(predict: str) -> Dict[str, float]:
+    """Protocol-only fallback when the trajectory server did not return reward.
+
+    TMCD-v2 truth-dependent utility is terminal and comes from the rollout
+    server. This path deliberately avoids per-step hidden-truth shaping.
+    """
+
+    packet, ok, _message = parse_action_json_v4(predict)
+    if not ok:
+        return {
+            "overall": -1.0,
+            "format": 0.0,
+            "legal_state_operation": 0.0,
+            "trajectory_reward_missing": -1.0,
+            "invalid": -1.0,
+        }
+    evidence_refs = [
+        str(ref)
+        for key in ("trust_operations", "memory_operations")
+        for operation in packet.get(key, []) or []
+        for ref in operation.get("evidence_refs", []) or []
+    ]
+    legal_structure = float(all(evidence_refs.count(ref) >= 1 for ref in evidence_refs))
+    return {
+        "overall": -0.25,
+        "format": 1.0,
+        "legal_state_operation": legal_structure,
+        "trajectory_reward_missing": -1.0,
+        "invalid": 0.0,
     }
 
 

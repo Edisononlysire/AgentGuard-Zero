@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import os
 import random
 import sys
 import threading
@@ -23,14 +25,16 @@ from eval_level1_select import (
     ACTIVE_PROBE_ACTIONS,
     ACTIVE_PROBE_TOOLS,
     PASSIVE_VERIFY_TOOLS,
+    Candidate,
     HFBackend,
     as_messages,
     compute_safe_utility,
     next_user_message,
     sanitize_initial_messages,
     scenario_extra_from_row,
-    select_candidate,
 )
+from agentguard_zero.schemas.action_schema import parse_action_json
+from agentguard_zero.schemas.action_schema_v4 import parse_action_json_v4
 from generate_level1_frontier import compute_cfc_metrics
 from level1_rollout_server import Level1RolloutStore
 
@@ -40,7 +44,7 @@ def _small_event(event: Any) -> dict[str, Any]:
         return {}
     return {
         key: event[key]
-        for key in ("event_id", "time", "type", "source", "objective_hint", "spoofability")
+        for key in ("event_id", "time", "type", "source", "source_id", "objective_hint", "source_assurance_level", "evidence_id")
         if key in event
     }
 
@@ -85,7 +89,10 @@ def _history_summary(
         }
     return {
         "t": turn,
-        "events": [_small_event(event) for event in observation.get("events", []) or []],
+        "events": [
+            _small_event(event)
+            for event in (observation.get("observed_events") or observation.get("events") or [])
+        ],
         "tool_result": tool_result,
         "decision": {
             "belief": top_belief,
@@ -94,6 +101,9 @@ def _history_summary(
             "action": response.get("action", "Observe"),
             "target": response.get("target", "none"),
             "source_reliability": trust.get("source_reliability", {}),
+            "trust_operations": packet.get("trust_operations", []),
+            "memory_operations": packet.get("memory_operations", []),
+            "memory_usage": packet.get("memory_usage", []),
             "quarantine": memory.get("profile_quarantine", []),
             "confirmed": memory.get("confirmed_profile", []),
             "rejected": memory.get("rejected_profile", []),
@@ -123,7 +133,11 @@ def _generation_messages(state: dict[str, Any]) -> list[dict[str, str]]:
 
 def _ambiguity_penalty(scenario: dict[str, Any]) -> float:
     assets = scenario.get("network_context", {}).get("assets", []) or []
-    fake = scenario.get("poisoning_plan", {}).get("fake_evidence", []) or []
+    fake = (
+        [item for item in scenario.get("event_schedule", []) or [] if not bool(item.get("truth_value", True))]
+        if scenario.get("protocol_version") == "tmcd-v2"
+        else scenario.get("poisoning_plan", {}).get("fake_evidence", []) or []
+    )
     claims = [str(item.get("claim", "")).strip() for item in fake]
     penalty = 0.0
     if len(assets) < 2:
@@ -148,8 +162,16 @@ def _action_metrics(result: dict[str, Any]) -> dict[str, Any]:
         memory = packet.get("memory_update", {}) or {}
         active += int(tool in ACTIVE_PROBE_TOOLS or action in ACTIVE_PROBE_ACTIONS)
         passive += int(tool in PASSIVE_VERIFY_TOOLS)
-        quarantined += len(memory.get("profile_quarantine", []) or [])
-        confirmed += len(memory.get("confirmed_profile", []) or [])
+        if packet.get("schema_version") == 4:
+            operations = packet.get("memory_operations", []) or []
+            quarantined += sum(
+                int(item.get("op") == "ingest" or item.get("op") == "demote")
+                for item in operations
+            )
+            confirmed += sum(int(item.get("op") == "promote") for item in operations)
+        else:
+            quarantined += len(memory.get("profile_quarantine", []) or [])
+            confirmed += len(memory.get("confirmed_profile", []) or [])
         summaries.append(
             {
                 "turn": selected.get("turn"),
@@ -284,11 +306,17 @@ class FeedbackEngine:
             selected_values = []
             for index, raw in zip(active, raw_outputs):
                 state = states[index]
-                selected = select_candidate(
-                    state["public_context"],
-                    [raw],
-                    self.args.policy,
-                    selector_mode=self.args.selector_mode,
+                is_v2 = state["scenario"].get("protocol_version") == "tmcd-v2"
+                packet, ok, parse_message = (
+                    parse_action_json_v4(raw) if is_v2 else parse_action_json(raw)
+                )
+                selected = Candidate(
+                    text=json.dumps(packet, ensure_ascii=False, separators=(",", ":")) if ok else raw,
+                    packet=packet,
+                    ok=ok,
+                    parse_msg=parse_message,
+                    selector_score=0.0,
+                    diagnostics={"policy": "train_only_direct", "v5c_used": False},
                 )
                 selected_values.append(selected)
                 state["selected_actions"].append(
@@ -378,7 +406,9 @@ class FeedbackEngine:
             "current_vda_correct_intent": bool(score.get("correct_intent", False)),
             "current_vda_attack_mitigated": bool(score.get("attack_mitigated", False)),
             "current_vda_attack_success": bool(score.get("attack_success", False)),
-            "current_vda_fake_confirmed": int(score.get("fake_confirmed", 0)),
+            "current_vda_fake_confirmed": int(
+                score.get("false_promoted_count", score.get("fake_confirmed", 0))
+            ),
             "current_vda_overresponse": bool(score.get("overresponse", False)),
             "current_vda_business_cost": float(score.get("business_cost", 0.0)),
             "current_vda_verification_cost": float(score.get("verification_cost", 0.0)),
@@ -386,6 +416,14 @@ class FeedbackEngine:
         }
 
     def evaluate_many(self, scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prepared = []
+        for scenario in scenarios:
+            value = copy.deepcopy(scenario)
+            metadata = dict(value.get("metadata", {}) or {})
+            metadata["experiment_variant"] = self.args.experiment_variant
+            value["metadata"] = metadata
+            prepared.append(value)
+        scenarios = prepared
         cfcs = [compute_cfc_metrics(scenario) for scenario in scenarios]
         solvable_indices = [
             index for index, cfc in enumerate(cfcs) if cfc.get("oracle_solvable", False)
@@ -477,6 +515,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--adapter-path", default="")
     parser.add_argument("--seed", type=int, default=20260709)
+    parser.add_argument(
+        "--experiment-variant",
+        choices=["full", "append_only_memory"],
+        default=os.environ.get("AGZ_EXPERIMENT_VARIANT", "full"),
+    )
     parser.add_argument("--max-turns", type=int, default=6)
     parser.add_argument("--max-input-tokens", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=256)

@@ -31,6 +31,8 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from agentguard_zero.schemas.action_schema import ALLOWED_ACTIONS, ALLOWED_TOOLS, OBJECTIVE_KEYS, parse_action_json
+from agentguard_zero.schemas.action_schema_v4 import parse_action_json_v4
+from agentguard_zero.governance.v5c import select_v5c_json
 from level1_rollout_server import Level1RolloutStore
 
 
@@ -49,6 +51,10 @@ HIDDEN_KEYS = {
     "attack_path",
     "is_fake",
     "is_true",
+    "truth_value",
+    "spoofability",
+    "behavior_schedule",
+    "future_schedule",
     "ground_truth",
     "hidden",
     "hidden_state",
@@ -875,6 +881,23 @@ def active_probe_candidate(public_context: Any, selector_mode: str) -> Candidate
 
 
 def select_candidate(public_context: Any, action_texts: list[str], policy: str, selector_mode: str = "mitigation_v2") -> Candidate:
+    context_dict = public_context if isinstance(public_context, dict) else {}
+    observation = context_dict.get("observation", context_dict)
+    if isinstance(observation, dict) and observation.get("protocol_version") == "tmcd-v2":
+        if policy == "agentguard_zero_select":
+            selected_text, diagnostics = select_v5c_json(context_dict, action_texts)
+            packet, ok, message = parse_action_json_v4(selected_text)
+            return Candidate(
+                selected_text,
+                packet,
+                ok,
+                message,
+                float(diagnostics.get("selected_score", 0.0)),
+                diagnostics,
+            )
+        raw = action_texts[0] if action_texts else "{}"
+        packet, ok, message = parse_action_json_v4(raw)
+        return Candidate(raw, packet, ok, message, 0.0, {"selector": "train_only_direct"})
     candidates = [score_candidate(public_context, text, selector_mode=selector_mode) for text in action_texts]
     if policy != "agentguard_zero_select":
         return candidates[0]

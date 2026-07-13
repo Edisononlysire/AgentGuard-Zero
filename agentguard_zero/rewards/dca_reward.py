@@ -19,6 +19,45 @@ def _clamp(value: Any, low: float = 0.0, high: float = 1.0) -> float:
 
 def _coverage_score(scenario: Dict[str, Any], task_focus: str) -> float:
     focus = task_focus.upper()
+    if scenario.get("protocol_version") == "tmcd-v2":
+        events = scenario.get("event_schedule", []) or []
+        constraints = scenario.get("defense_constraints", {}) or {}
+        family = str(scenario.get("scenario_family", ""))
+        profiles = scenario.get("source_profiles", []) or []
+        if focus.startswith("T1"):
+            distinct_sources = {str(item.get("source_id", "")) for item in events}
+            return _flag(len(distinct_sources) >= 2 and int(constraints.get("verification_budget", 0)) >= 1)
+        if focus.startswith("T2"):
+            honest_prefix = max(
+                (
+                    sum(
+                        max(0, int(segment.get("end_time", -1)) - int(segment.get("start_time", 0)) + 1)
+                        for segment in profile.get("behavior_schedule", []) or []
+                        if segment.get("mode") == "honest"
+                    )
+                    for profile in profiles
+                ),
+                default=0,
+            )
+            return _flag(
+                family == "trust_betrayal"
+                and honest_prefix >= 2
+                and scenario.get("trajectory_type") in {"betrayal", "legitimate_change"}
+                and scenario.get("pair_id")
+            )
+        if focus.startswith("T3"):
+            poison_claims = [item for item in events if not bool(item.get("truth_value", True))]
+            later_clean = any(
+                bool(item.get("truth_value", True))
+                and int(item.get("time", 0)) > min((int(x.get("time", 0)) for x in poison_claims), default=10**9)
+                for item in events
+            )
+            return _flag(family == "profile_poisoning" and len(poison_claims) >= 2 and later_clean)
+        if focus.startswith("T4"):
+            assets = scenario.get("network_context", {}).get("assets", []) or []
+            critical = max((float(item.get("criticality", 0.0)) for item in assets), default=0.0)
+            return _flag(family == "business_overresponse" and critical >= 0.8)
+        return 0.5
     poisoning = scenario.get("poisoning_plan", {}) or {}
     constraints = scenario.get("defense_constraints", {}) or {}
     trust_steps = len(scenario.get("trust_building_plan", []) or [])
@@ -85,6 +124,7 @@ def compute_dca_reward(
         )
     )
     coverage = _coverage_score(scenario, task_focus)
+    normal_change = _clamp(eval_result.get("normal_change_discrimination", 0.0))
 
     fingerprint = scenario_fingerprint(scenario)
     repetition = _flag(seen_fingerprints and fingerprint in set(seen_fingerprints))
@@ -102,6 +142,7 @@ def compute_dca_reward(
             + 0.10 * poisoning_strength
             + 0.10 * business_challenge
             + 0.12 * coverage
+            + 0.08 * normal_change
             - 0.35 * repetition
             - 0.25 * ambiguity
         )
@@ -121,6 +162,7 @@ def compute_dca_reward(
         "poisoning_strength": poisoning_strength,
         "business_challenge": business_challenge,
         "coverage": coverage,
+        "normal_change_discrimination": normal_change,
         "unsafe_penalty": -unsafe,
         "invalid_penalty": -invalid,
         "ambiguity_penalty": -ambiguity,

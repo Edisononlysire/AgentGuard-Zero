@@ -1,0 +1,24 @@
+{
+  "protocol_version": "tmcd-v2",
+  "schema_version": 4,
+  "frozen_at": "2026-07-13T00:00:00Z",
+  "update_order": "dca_first_alternating",
+  "rounds": 3,
+  "dca_feedback_candidates_per_round": 4000,
+  "dca_max_update_steps": 50,
+  "vda_candidate_pool_per_round": 10000,
+  "vda_train_per_round": 2400,
+  "vda_dev_per_round": 400,
+  "vda_xplay_per_round": 800,
+  "vda_max_update_steps": 75,
+  "fixed_seed": 20260709,
+  "v5c_in_dca_feedback": false,
+  "v5c_in_vda_training": false,
+  "v5c_in_cross_play": false,
+  "tool_evidence_delay_steps": 1,
+  "formal_systems": {
+    "AgentGuard-Zero-Train": "VDA_3 + Defender State Layer",
+    "AgentGuard-Zero-Select": "Frozen Qwen + Defender State Layer + V5-C",
+    "AgentGuard-Zero-Full": "VDA_3 + Defender State Layer + V5-C"
+  }
+}

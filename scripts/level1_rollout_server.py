@@ -19,8 +19,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from agentguard_zero.env.oracle import score_trajectory
+from agentguard_zero.env.oracle_v2 import score_trajectory_v2
 from agentguard_zero.env.scenario_instantiator import instantiate_scenario
 from agentguard_zero.schemas.action_schema import OBJECTIVE_KEYS, parse_action_json
+from agentguard_zero.schemas.action_schema_v4 import parse_action_json_v4
 from agentguard_zero.schemas.scenario_schema import minimal_example
 
 
@@ -175,7 +177,10 @@ class Level1RolloutStore:
         if state.done:
             return self._done_observation(state, valid=True, invalid_reason=None, finish=finish), True, True
 
-        action_packet, ok, parse_msg = parse_action_json(action_text)
+        if getattr(state.env, "protocol_version", "") == "tmcd-v2":
+            action_packet, ok, parse_msg = parse_action_json_v4(action_text)
+        else:
+            action_packet, ok, parse_msg = parse_action_json(action_text)
         if not ok:
             state.invalid_count += 1
 
@@ -217,16 +222,19 @@ class Level1RolloutStore:
         if state.final_score is not None:
             return state.final_score
 
-        raw_score = score_trajectory(
-            state.scenario,
-            state.env.history,
-            state.env.memory,
-            bool(state.env.attack_mitigated),
-            bool(state.env.attack_success),
-            float(state.env.business_cost),
-            float(state.env.verification_cost),
-            int(state.env.high_impact_count),
-        )
+        if getattr(state.env, "protocol_version", "") == "tmcd-v2":
+            raw_score = score_trajectory_v2(state.env)
+        else:
+            raw_score = score_trajectory(
+                state.scenario,
+                state.env.history,
+                state.env.memory,
+                bool(state.env.attack_mitigated),
+                bool(state.env.attack_success),
+                float(state.env.business_cost),
+                float(state.env.verification_cost),
+                int(state.env.high_impact_count),
+            )
         raw_reward = float(raw_score.get("reward", 0.0))
         trajectory_reward = raw_reward - self.invalid_penalty * float(state.invalid_count)
         score = dict(raw_score)

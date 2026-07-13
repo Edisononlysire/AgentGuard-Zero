@@ -1,0 +1,10 @@
+{
+  "protocol_version": "tmcd-v2",
+  "scenario_schema": 4,
+  "observation_schema": 4,
+  "action_schema": 4,
+  "checkpoint_manifest_schema": 2,
+  "evidence_record_schema": 1,
+  "trust_state_schema": 1,
+  "memory_state_schema": 1
+}

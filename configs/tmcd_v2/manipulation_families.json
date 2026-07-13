@@ -1,0 +1,18 @@
+{
+  "protocol_version": "tmcd-v2",
+  "train_families": [
+    "active_probe_ambiguity",
+    "trust_betrayal",
+    "profile_poisoning",
+    "business_overresponse"
+  ],
+  "clean_families": [
+    "clean_attack_progression",
+    "clean_legitimate_change"
+  ],
+  "composition_templates": [
+    "betrayal_then_profile_poisoning",
+    "probe_ambiguity_then_business_pressure",
+    "profile_poisoning_then_overresponse"
+  ]
+}

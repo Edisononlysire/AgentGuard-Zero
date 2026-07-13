@@ -1,0 +1,15 @@
+{
+  "protocol_version": "tmcd-v2",
+  "frozen_before_training": true,
+  "ood_families": [
+    "cross_source_sleeper_betrayal",
+    "poison_recovery_reentry",
+    "trust_memory_feedback_composition"
+  ],
+  "blocked_splits": [
+    "train",
+    "dev",
+    "xplay",
+    "dca_feedback"
+  ]
+}

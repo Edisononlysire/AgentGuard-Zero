@@ -19,7 +19,6 @@ import sys
 from collections import Counter, defaultdict
 from typing import Any, Callable
 
-import pandas as pd
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -495,6 +494,8 @@ def _target_criticality(scenario: dict[str, Any]) -> float:
 
 
 def compute_cfc_metrics(scenario: dict[str, Any]) -> dict[str, Any]:
+    if scenario.get("protocol_version") == "tmcd-v2":
+        return compute_cfc_metrics_v2(scenario)
     checks = full_check(scenario)
     if not checks.get("all_ok", False):
         return {
@@ -578,6 +579,88 @@ def compute_cfc_metrics(scenario: dict[str, Any]) -> dict[str, Any]:
         "true_objective": scenario.get("oracle", {}).get("true_objective", "unknown"),
         "false_objective": scenario.get("poisoning_plan", {}).get("false_objective", "unknown"),
         "fake_count": fake_count,
+        "phase_len": phase_len,
+    }
+
+
+def compute_cfc_metrics_v2(scenario: dict[str, Any]) -> dict[str, Any]:
+    """Static hard-but-solvable frontier score for TMCD-v2 generation.
+
+    Current-VDA weakness is measured separately by the feedback server. This
+    filter only uses hidden truth offline to reject unsafe, inconsistent, or
+    unsolvable curricula; none of these values enter defender observations.
+    """
+
+    checks = full_check(scenario)
+    if not checks.get("all_ok", False):
+        return {
+            "all_ok": False,
+            "oracle_solvable": False,
+            "frontier_score": 0.0,
+            "difficulty": 1.0,
+            "checks": checks,
+        }
+    events = scenario.get("event_schedule", []) or []
+    manipulated = [item for item in events if not bool(item.get("truth_value", True))]
+    source_profiles = scenario.get("source_profiles", []) or []
+    priors = [float(item.get("public_prior", 0.5)) for item in source_profiles]
+    avg_prior = statistics.mean(priors) if priors else 0.5
+    avg_spoof = statistics.mean(
+        [float(item.get("spoofability", 0.0)) for item in manipulated]
+    ) if manipulated else 0.0
+    phase_len = len(scenario.get("true_attack", {}).get("phase_schedule", []))
+    verification_budget = max(
+        1.0,
+        float(scenario.get("defense_constraints", {}).get("verification_budget", 4)),
+    )
+    target_criticality = _target_criticality(scenario)
+    family = str(scenario.get("scenario_family", "unknown"))
+    trust_prefix = max(0, int(scenario.get("divergence_time", 0)))
+    manipulation_pressure = _clamp(len(manipulated) / verification_budget)
+    historical_anchor = _clamp(0.6 * avg_prior + 0.4 * min(1.0, trust_prefix / 4.0))
+    deception_pressure = _clamp(0.55 * avg_spoof + 0.45 * manipulation_pressure)
+    business_pressure = _clamp(
+        0.7 * target_criticality
+        + 0.3 * (1.0 if family == "business_overresponse" else 0.0)
+    )
+    long_horizon = _clamp((phase_len - 3.0) / 5.0)
+    difficulty = _clamp(
+        0.30 * deception_pressure
+        + 0.25 * historical_anchor
+        + 0.20 * business_pressure
+        + 0.15 * long_horizon
+        + 0.10 * min(1.0, len(events) / 8.0)
+    )
+    has_discriminating_followup = not manipulated or any(
+        int(item.get("time", 0)) > min(int(row.get("time", 0)) for row in manipulated)
+        for item in events
+    )
+    oracle_solvable = bool(checks.get("all_ok", False) and has_discriminating_followup)
+    frontier_score = _clamp(0.75 * difficulty + 0.25 * manipulation_pressure) if oracle_solvable else 0.0
+    return {
+        "all_ok": True,
+        "checks": checks,
+        "oracle_solvable": oracle_solvable,
+        "frontier_score": float(frontier_score),
+        "difficulty": float(difficulty),
+        "poisoning_subtlety": float(deception_pressure),
+        "verification_pressure": float(manipulation_pressure),
+        "deception_pressure": float(deception_pressure),
+        "business_pressure": float(business_pressure),
+        "long_horizon": float(long_horizon),
+        "verification_value": float(has_discriminating_followup),
+        "poisoning_success_proxy": 0.0,
+        "overresponse_pressure": float(family == "business_overresponse"),
+        "normal_change_discrimination": float(
+            family == "trust_betrayal" and scenario.get("trajectory_type") == "legitimate_change"
+        ),
+        "split": str(scenario.get("metadata", {}).get("task_id", "unknown")),
+        "true_objective": scenario.get("oracle", {}).get("true_objective", "unknown"),
+        "false_objective": next(
+            (item.get("objective_hint", "unknown") for item in manipulated),
+            "none",
+        ),
+        "fake_count": len(manipulated),
         "phase_len": phase_len,
     }
 
@@ -677,6 +760,8 @@ def build_frontier(args: argparse.Namespace) -> dict[str, Any]:
     _write_json(candidates_path, items)
     _write_json(frontier_path, frontier)
     os.makedirs(os.path.dirname(frontier_parquet) or ".", exist_ok=True)
+    import pandas as pd
+
     pd.DataFrame(rows).to_parquet(frontier_parquet, index=False)
 
     split_counts = Counter(item["cfc"].get("split", "unknown") for item in frontier)

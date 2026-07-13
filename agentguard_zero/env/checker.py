@@ -128,6 +128,10 @@ def safety_checker(scenario: Dict[str, Any]) -> Tuple[bool, str]:
 
 
 def full_check(scenario: Dict[str, Any]) -> Dict[str, Any]:
+    if scenario.get("protocol_version") == "tmcd-v2":
+        from agentguard_zero.env.checker_v2 import full_check_v2
+
+        return full_check_v2(scenario)
     checks = {}
     for name, fn in [
         ("format", format_checker),

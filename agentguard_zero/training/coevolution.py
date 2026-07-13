@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PROTOCOL_VERSION = "tmcd-v2"
 ROLES = {"dca", "vda"}
 
 
@@ -129,6 +130,7 @@ def write_base_manifest(
         return load_checkpoint_manifest(target, role=role, backbone=backbone, round_index=0)
     manifest = {
         "schema_version": SCHEMA_VERSION,
+        "protocol_version": PROTOCOL_VERSION,
         "kind": "checkpoint",
         "role": role,
         "backbone": backbone,
@@ -260,6 +262,7 @@ def write_trained_manifest(
     frozen_training_config = dict(training_config or {})
     manifest = {
         "schema_version": SCHEMA_VERSION,
+        "protocol_version": PROTOCOL_VERSION,
         "kind": "checkpoint",
         "role": role,
         "backbone": backbone,
@@ -385,10 +388,13 @@ class RoundLayout:
     backbone: str
     source_round: int
     artifact_scope: str = "formal"
+    experiment_variant: str = "full"
 
     def __post_init__(self) -> None:
-        if self.artifact_scope not in {"formal", "pilot"}:
+        if self.artifact_scope not in {"formal", "pilot", "tmcd_v2", "tmcd_v2_pilot"}:
             raise ValueError(f"unsupported artifact scope: {self.artifact_scope}")
+        if not self.experiment_variant or "/" in self.experiment_variant or ".." in self.experiment_variant:
+            raise ValueError(f"invalid experiment variant: {self.experiment_variant}")
 
     @property
     def target_round(self) -> int:
@@ -396,13 +402,27 @@ class RoundLayout:
 
     @property
     def data_dir(self) -> Path:
-        tree = "co_evolution" if self.artifact_scope == "formal" else "co_evolution_pilot"
-        return self.root / "data" / tree / self.backbone / f"round_{self.target_round}"
+        tree = {
+            "formal": "co_evolution",
+            "pilot": "co_evolution_pilot",
+            "tmcd_v2": "tmcd_v2",
+            "tmcd_v2_pilot": "tmcd_v2_pilot",
+        }[self.artifact_scope]
+        base = self.root / "data" / tree
+        if self.experiment_variant != "full":
+            base = base / "ablations" / self.experiment_variant
+        return base / self.backbone / f"round_{self.target_round}"
 
     def checkpoint_dir(self, role: str, round_index: int | None = None) -> Path:
         if role not in ROLES:
             raise ValueError(f"unsupported role: {role}")
         index = self.target_round if round_index is None else int(round_index)
+        if self.artifact_scope in {"tmcd_v2", "tmcd_v2_pilot"}:
+            tree = "tmcd_v2" if self.artifact_scope == "tmcd_v2" else "tmcd_v2_pilot"
+            base = self.root / "checkpoints" / tree
+            if self.experiment_variant != "full":
+                base = base / "ablations" / self.experiment_variant
+            return base / self.backbone / role / f"round_{index}"
         tree = "checkpoints" if self.artifact_scope == "formal" else "checkpoints_pilot"
         return self.root / tree / self.backbone / role / f"round_{index}"
 

@@ -26,6 +26,7 @@ from agentguard_zero.training.coevolution import (
     utc_now,
 )
 from agentguard_zero.training.dca_dataset import TASK_FOCI, build_dca_messages
+from agentguard_zero.schemas.scenario_schema_v2 import public_prefix_hash
 
 
 def _extract_json_object(text: str) -> tuple[dict[str, Any], bool, str]:
@@ -133,6 +134,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--experiment-variant",
+        choices=["full", "append_only_memory"],
+        default="full",
+    )
     return parser.parse_args()
 
 
@@ -206,6 +212,7 @@ def main() -> None:
         "temperature": args.temperature,
         "top_p": args.top_p,
         "top_k": args.top_k,
+        "experiment_variant": args.experiment_variant,
     }
     if not args.resume:
         partial_path.unlink(missing_ok=True)
@@ -274,9 +281,14 @@ def main() -> None:
                         "source_dca_round": int(manifest["round"]),
                         "source_checkpoint_manifest": str(manifest_path),
                         "source_checkpoint_manifest_sha256": sha256_file(manifest_path),
+                        "experiment_variant": args.experiment_variant,
                     }
                 )
                 scenario["metadata"] = metadata
+                if scenario.get("protocol_version") == "tmcd-v2":
+                    scenario["split"] = "train"
+                    if scenario.get("scenario_family") == "trust_betrayal":
+                        scenario["prefix_hash"] = public_prefix_hash(scenario)
                 fingerprint = scenario_fingerprint(scenario)
                 scenario["scenario_id"] = (
                     f"DCA-{manifest['backbone']}-R{manifest['round']}-{index:06d}-{fingerprint[:8]}"
@@ -335,6 +347,7 @@ def main() -> None:
         "num_all_checks_ok": sum(item.get("checks", {}).get("all_ok", False) for item in records),
         "num_duplicates": duplicate_count,
         "generation_config": partial_config,
+        "experiment_variant": args.experiment_variant,
         "candidates": records,
     }
     atomic_write_json(args.output, output)
