@@ -297,6 +297,9 @@ class TMCDV2ReleaseTests(unittest.TestCase):
             self.assertIn(node, source)
             self.assertIn('source "${ROOT}/scripts/qwen35_env.sh"', source)
             self.assertIn('source "${ROOT}/scripts/env.sh"', source)
+            self.assertIn("AGZ_DCA_PPO_MICRO_BATCH_SIZE_PER_GPU=1", source)
+            self.assertIn("AGZ_VDA_PPO_MICRO_BATCH_SIZE_PER_GPU=1", source)
+            self.assertIn("AGZ_RESHARD_AFTER_FORWARD=true", source)
             self.assertIn("--dca-steps 50", source)
             self.assertIn("--vda-steps 75", source)
 
