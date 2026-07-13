@@ -280,6 +280,8 @@ class TMCDV2ReleaseTests(unittest.TestCase):
             source = (jobs / name).read_text(encoding="utf-8")
             self.assertIn('#DSUB -R "cpu=64;gpu=4;mem=230000"', source)
             self.assertIn(node, source)
+            self.assertIn('source "${ROOT}/scripts/qwen35_env.sh"', source)
+            self.assertIn('source "${ROOT}/scripts/env.sh"', source)
             self.assertIn("--dca-steps 50", source)
             self.assertIn("--vda-steps 75", source)
 

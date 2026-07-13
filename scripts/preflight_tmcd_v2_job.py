@@ -20,7 +20,14 @@ from agentguard_zero.training.coevolution import atomic_write_json, model_identi
 
 
 def _run(command: list[str], *, cwd: Path = ROOT) -> str:
-    completed = subprocess.run(command, cwd=cwd, check=True, text=True, capture_output=True)
+    completed = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
+    if completed.returncode:
+        detail = "\n".join(
+            part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
+        )
+        raise SystemExit(
+            f"preflight command failed ({completed.returncode}): {' '.join(command)}\n{detail}"
+        )
     return completed.stdout.strip()
 
 

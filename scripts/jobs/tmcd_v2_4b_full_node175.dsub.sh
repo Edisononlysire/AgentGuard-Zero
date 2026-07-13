@@ -23,6 +23,7 @@ export AGZ_VDA_FEEDBACK_MAX_TURNS=16
 export AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS=4096
 export AGZ_VDA_FEEDBACK_MAX_NEW_TOKENS=384
 source "${ROOT}/scripts/qwen35_env.sh"
+source "${ROOT}/scripts/env.sh"
 
 python -s "${ROOT}/scripts/preflight_tmcd_v2_job.py" \
   --backbone qwen3.5-4b \
