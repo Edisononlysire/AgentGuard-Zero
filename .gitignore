@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.so
+.DS_Store
+.idea/
+.vscode/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Generated experiments and private assets
+/checkpoints/
+/checkpoints_pilot/
+/data/
+/logs/
+/models/
+/outputs/
+/wandb/
+/env_overlays/
+*.parquet
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.log
+
+# Secrets and local environment overrides
+.env
+.env.*
+!configs/environment.example
+*secret*
+*credentials*

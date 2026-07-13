@@ -1,0 +1,23 @@
+# Versions used by the reference GPU environment. Install PyTorch,
+# causal-conv1d, and FlashAttention wheels that match the local CUDA runtime.
+torch==2.7.0
+transformers==5.13.0
+fla-core==0.5.1
+causal-conv1d==1.6.2.post1
+accelerate==1.7.0
+datasets==3.6.0
+peft==0.15.2
+pandas==2.3.0
+pyarrow==20.0.0
+ray[default]==2.46.0
+vllm==0.9.1
+hydra-core==1.3.3
+omegaconf==2.3.0
+tensordict==0.13.0
+fastapi==0.115.12
+codetiming
+dill
+packaging>=20
+pylatexenc
+torchdata
+wandb

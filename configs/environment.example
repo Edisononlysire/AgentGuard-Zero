@@ -1,0 +1,20 @@
+# Copy these exports into your shell or scheduler environment. Do not commit
+# local paths or credentials.
+export AGZ_QWEN35_4B_PATH=/path/to/Qwen3.5-4B
+export AGZ_QWEN35_9B_PATH=/path/to/Qwen3.5-9B
+export HF_HOME="$HOME/.cache/huggingface"
+export AGZ_TRITON_CACHE_ROOT="${TMPDIR:-/tmp}/agentguard_zero_triton_${USER}"
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export AGZ_SEED=20260709
+
+# Optional target-directory installs for Qwen3.5 runtime compatibility.
+# export AGZ_TRANSFORMERS_OVERLAY=/path/to/transformers-target
+# export AGZ_FLA_OVERLAY=/path/to/fla-core-target
+# export AGZ_CAUSAL_CONV_OVERLAY=/path/to/causal-conv1d-target
+
+# Optional evaluation-only baselines.
+export AGZ_CYBER_LLM_MODEL_PATH=/path/to/Foundation-Sec-8B-Instruct
+export AGZ_LILY_CYBER_MODEL_PATH=/path/to/Lily-Cybersecurity-7B-v0.2
+
+# API evaluation reads the key from the variable named by --api_key_env.
+# export YOUR_PROVIDER_API_KEY=replace-at-runtime

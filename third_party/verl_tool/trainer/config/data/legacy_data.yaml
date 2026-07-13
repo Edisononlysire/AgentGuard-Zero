@@ -1,0 +1,114 @@
+# Default RLHF parquet data configuration used by ppo_trainer.yaml.
+# AgentGuard-Zero smoke and experiment scripts override train_files, val_files,
+# prompt_key, batch sizes, and sequence lengths from the command line.
+
+# Training parquet file or list of parquet files.
+train_files: null
+
+# Validation parquet file or list of parquet files.
+val_files: null
+
+# Tokenizer class or path. Null lets the trainer infer it from the model.
+tokenizer: null
+
+# Column containing chat-format prompt messages.
+prompt_key: prompt
+
+# Column used by the reward manager to dispatch reward logic.
+reward_fn_key: data_source
+
+# Global batch size for PPO prompts.
+train_batch_size: 256
+
+# Validation batch size. Null lets the trainer use the full validation set.
+val_batch_size: null
+
+# Generation batch size.
+gen_batch_size: ${data.train_batch_size}
+
+# Maximum prompt token length after chat templating.
+max_prompt_length: 1024
+
+# Maximum generated response token length.
+max_response_length: 1024
+
+# Prompt truncation policy: error, left, right, or middle depending on tokenizer utilities.
+truncation: error
+
+# Shuffle training data.
+shuffle: true
+
+# Data-loader and shuffle seed.
+seed: 1
+
+# Number of dataloader workers.
+dataloader_num_workers: 0
+
+# Whether to shuffle validation data.
+validation_shuffle: false
+
+# Cache directory for locally copied parquet files.
+cache_dir: ~/.cache/verl/rlhf
+
+# Number of workers used for filtering overlong prompts.
+filter_overlong_prompts_workers: 1
+
+# Drop prompts that exceed max_prompt_length.
+filter_overlong_prompts: true
+
+# Whether the dataset should run prompt filtering.
+filter_prompts: true
+
+# Dataset shared-memory copy flag.
+use_shm: false
+
+# Return the raw chat messages with each example.
+return_raw_chat: false
+
+# Return original input ids without adding a chat template.
+return_raw_input_ids: false
+
+# Return the full rendered prompt with each example.
+return_full_prompt: false
+
+# Whether tool arguments are needed by the rollout path.
+need_tools_kwargs: false
+
+# Optional dataset class override.
+custom_cls:
+
+  # Python file containing a custom dataset class.
+  path: null
+
+  # Custom dataset class name.
+  name: null
+
+# Multimodal image column name.
+image_key: images
+
+# Multimodal video column name.
+video_key: videos
+
+# Return multimodal tensors when processor is present.
+return_multi_modal_inputs: true
+
+# Allow remote tokenizer/model code when loading datasets and tokenizers.
+trust_remote_code: false
+
+# Optional data generation hook.
+datagen:
+
+  # Python file or package path for a data generator.
+  path: null
+
+  # Data generator class name.
+  name: null
+
+# Optional sampler override.
+sampler:
+
+  # Python module path for a custom sampler.
+  class_path: null
+
+  # Custom sampler class name.
+  class_name: null

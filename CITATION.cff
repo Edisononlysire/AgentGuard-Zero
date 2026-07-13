@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: "AgentGuard-Zero: Zero-Label Co-Evolution for Safe Cyber Defense under Trust Deception and Profile Poisoning"
+message: "Please cite the AgentGuard-Zero paper when using this code."
+type: software
+version: 0.1.0
+license: Apache-2.0
+authors:
+  - name: "AgentGuard-Zero Authors"

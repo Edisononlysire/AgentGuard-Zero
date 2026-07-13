@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentguard-zero"
+version = "0.1.0"
+description = "DCA-VDA co-evolution for safe cyber defense under trust manipulation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+  "jinja2>=3.1",
+  "numpy>=1.26,<2",
+  "pandas>=2.0",
+  "pyarrow>=15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[tool.setuptools.packages.find]
+include = ["agentguard_zero*"]
+
+[tool.setuptools.package-data]
+agentguard_zero = ["prompts/*.jinja"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+exclude = ["third_party"]
