@@ -16,6 +16,8 @@ from agentguard_zero.tools.graph_query import graph_query
 from agentguard_zero.tools.log_query import log_query
 from agentguard_zero.tools.provenance import provenance_check
 from agentguard_zero.world.public_projector import assert_public, project_event, project_public
+from agentguard_zero.world.hidden_world import HiddenWorld
+from agentguard_zero.world.oracle_ledger import OracleLedger
 
 
 HIGH_IMPACT_ACTIONS = {"Isolate", "Restore", "Remove"}
@@ -32,21 +34,23 @@ class CyberDefenseEnvV2:
         if not valid:
             raise ValueError(f"invalid TMCD-v2 scenario: {reason}")
         self.scenario = copy.deepcopy(scenario)
-        self.true_objective = str(scenario["oracle"]["true_objective"])
         self.max_steps = int(max_steps or max(5, len(scenario.get("true_attack", {}).get("phase_schedule", [])) + 2))
+        self.hidden_world = HiddenWorld(scenario, horizon=self.max_steps)
+        self.true_objective = self.hidden_world.true_objective
         self.t = 0
         self.evidence_store = EvidenceStore()
         self.trust_manager = ContextualTrustManager()
         self.experiment_variant = str(
             scenario.get("metadata", {}).get("experiment_variant", "full")
         )
+        self.state_layer_enabled = self.experiment_variant != "no_state_layer"
         self.memory = (
             AppendOnlyProfileMemory()
             if self.experiment_variant == "append_only_memory"
             else EvidenceStateMemory()
         )
         self.history: list[dict[str, Any]] = []
-        self.oracle_ledger: list[dict[str, Any]] = []
+        self.oracle_ledger = OracleLedger()
         self.business_cost = 0.0
         self.verification_cost = 0.0
         self.high_impact_count = 0
@@ -113,8 +117,8 @@ class CyberDefenseEnvV2:
             time=self.t,
             observed_events=events,
             evidence_snapshot=self.evidence_store.public_snapshot(time=self.t),
-            trust_snapshot=self.trust_manager.public_snapshot(),
-            memory_retrieval=retrieval,
+            trust_snapshot=(self.trust_manager.public_snapshot() if self.state_layer_enabled else {}),
+            memory_retrieval=(retrieval if self.state_layer_enabled else {}),
             remaining_business_budget=float(constraints.get("business_budget", 5.0)) - self.business_cost,
             verification_remaining=float(constraints.get("verification_budget", 4)) - self.verification_cost,
             last_tool_result=self.last_tool_result,
@@ -207,22 +211,27 @@ class CyberDefenseEnvV2:
         self.observe()
         # Freeze s_t before any response or persistent probe effect is committed.
         snapshot = self._internal_events()
-        trust_events = self.trust_manager.apply(
-            action_packet.get("trust_operations", []),
-            evidence_store=self.evidence_store,
-            time=self.t,
-        )
-        memory_events = self.memory.apply(
-            action_packet.get("memory_operations", []),
-            evidence_store=self.evidence_store,
-            trust_manager=self.trust_manager,
-            time=self.t,
-        )
-        accepted_memory = self.memory.record_usage(
-            action_packet.get("memory_usage", []),
-            retrieved_ids=self._last_retrieved_ids,
-            time=self.t,
-        )
+        if self.state_layer_enabled:
+            trust_events = self.trust_manager.apply(
+                action_packet.get("trust_operations", []),
+                evidence_store=self.evidence_store,
+                time=self.t,
+            )
+            memory_events = self.memory.apply(
+                action_packet.get("memory_operations", []),
+                evidence_store=self.evidence_store,
+                trust_manager=self.trust_manager,
+                time=self.t,
+            )
+            accepted_memory = self.memory.record_usage(
+                action_packet.get("memory_usage", []),
+                retrieved_ids=self._last_retrieved_ids,
+                time=self.t,
+            )
+        else:
+            trust_events = []
+            memory_events = []
+            accepted_memory = []
 
         response = action_packet.get("response", {}) if isinstance(action_packet.get("response", {}), dict) else {}
         target = str(response.get("target", self.scenario["true_attack"]["target"]))
@@ -234,8 +243,13 @@ class CyberDefenseEnvV2:
             self.high_impact_count += 1
         belief = action_packet.get("belief", {}) if isinstance(action_packet.get("belief", {}), dict) else {}
         top_belief = max(belief, key=lambda key: float(belief.get(key, 0.0))) if belief else "unknown"
-        if top_belief == self.true_objective and action in MITIGATING_ACTIONS:
-            self.attack_mitigated = True
+        belief_matches = top_belief == self.true_objective
+        self.hidden_world.apply_response(
+            action=action,
+            belief_matches=belief_matches,
+            time=self.t,
+        )
+        self.attack_mitigated = self.hidden_world.mitigated
 
         # Compute the probe after response submission, but only against the
         # frozen pre-response snapshot. Its evidence is unavailable until t+1.
@@ -276,8 +290,11 @@ class CyberDefenseEnvV2:
         }
         assert_public(public_step)
         self.history.append(public_step)
+        self.hidden_world.advance_attack()
+        self.attack_success = self.hidden_world.succeeded
         self.t += 1
-        done = self.t >= self.max_steps or self.attack_mitigated
+        done = self.t >= self.max_steps or self.attack_mitigated or self.attack_success
         if done and not self.attack_mitigated:
             self.attack_success = True
+            self.hidden_world.succeeded = True
         return ({} if done else self.observe()), copy.deepcopy(self.last_tool_result), done

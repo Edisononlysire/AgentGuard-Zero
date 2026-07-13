@@ -154,6 +154,13 @@ def public_prefix_hash(scenario: dict[str, Any]) -> str:
     payload = {
         "network_context": scenario.get("network_context", {}),
         "defense_constraints": scenario.get("defense_constraints", {}),
+        "source_profiles": [
+            {
+                "source_id": str(profile.get("source_id", "")),
+                "public_prior": float(profile.get("public_prior", 0.5)),
+            }
+            for profile in scenario.get("source_profiles", [])
+        ],
         "events": events,
     }
     raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))

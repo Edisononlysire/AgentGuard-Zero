@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from pathlib import Path
 
 from agentguard_zero.defender_state.evidence_store import EvidenceStore
 from agentguard_zero.defender_state.memory_fsm import EvidenceStateMemory
@@ -86,17 +87,18 @@ class TMCDV2IsolationTests(unittest.TestCase):
 class TMCDV2StateTests(unittest.TestCase):
     def _state_fixture(self):
         store = EvidenceStore()
+        claim = {"entity_id": "asset-A", "predicate": "risk_level", "object": "high", "scope": "exfiltration"}
         first = store.add_event(
-            {"event_id": "claim-1", "source_id": "A", "type": "alert", "verdict": "supported"},
+            {"event_id": "claim-1", "source_id": "A", "type": "alert", "verdict": "supported", "claim_semantics": claim},
             time=0,
         )
         second = store.add_event(
-            {"event_id": "claim-2", "source_id": "B", "type": "alert", "verdict": "supported"},
+            {"event_id": "claim-2", "source_id": "B", "type": "alert", "verdict": "supported", "claim_semantics": claim},
             time=0,
         )
         trust = ContextualTrustManager()
         trust.register_claim(
-            {"event_id": "claim-1", "source_id": "A", "source_assurance_level": "high"},
+            {"event_id": "claim-1", "source_id": "A", "source_assurance_level": "high", "claim_semantics": claim},
             time=0,
         )
         trust.apply(
@@ -105,7 +107,6 @@ class TMCDV2StateTests(unittest.TestCase):
             time=0,
         )
         memory = EvidenceStateMemory()
-        claim = {"entity_id": "asset-A", "predicate": "risk_level", "object": "high", "scope": "exfiltration"}
         ingest = memory.apply(
             [{"op": "ingest", "claim": claim, "source_ids": ["A"], "evidence_refs": [first]}],
             evidence_store=store,
@@ -115,10 +116,14 @@ class TMCDV2StateTests(unittest.TestCase):
         return store, trust, memory, first, second, ingest["memory_id"]
 
     def test_direct_confirm_falls_back_to_quarantine(self) -> None:
-        store, trust, memory, first, _second, _memory_id = self._state_fixture()
+        store, trust, memory, _first, _second, _memory_id = self._state_fixture()
         claim = {"entity_id": "asset-B", "predicate": "risk_level", "object": "low", "scope": "exfiltration"}
+        matching = store.add_event(
+            {"event_id": "claim-B", "source_id": "A", "type": "alert", "claim_semantics": claim},
+            time=0,
+        )
         result = memory.apply(
-            [{"op": "ingest", "claim": claim, "source_ids": ["A"], "evidence_refs": [first], "target_status": "confirmed"}],
+            [{"op": "ingest", "claim": claim, "source_ids": ["A"], "evidence_refs": [matching], "target_status": "confirmed"}],
             evidence_store=store,
             trust_manager=trust,
             time=0,
@@ -143,6 +148,32 @@ class TMCDV2StateTests(unittest.TestCase):
         self.assertFalse(denied["committed"])
         self.assertTrue(allowed["committed"])
         self.assertEqual(memory.records[memory_id]["status"], "confirmed")
+
+    def test_unrelated_evidence_cannot_satisfy_promotion(self) -> None:
+        store, trust, memory, first, _second, memory_id = self._state_fixture()
+        unrelated = store.add_event(
+            {
+                "event_id": "unrelated",
+                "source_id": "C",
+                "type": "alert",
+                "verdict": "supported",
+                "claim_semantics": {
+                    "entity_id": "asset-Z",
+                    "predicate": "owner",
+                    "object": "team-Z",
+                    "scope": "inventory",
+                },
+            },
+            time=0,
+        )
+        result = memory.apply(
+            [{"op": "promote", "memory_id": memory_id, "event_id": "claim-1", "evidence_refs": [first, unrelated]}],
+            evidence_store=store,
+            trust_manager=trust,
+            time=0,
+        )[0]
+        self.assertFalse(result["committed"])
+        self.assertIn("irrelevant_claim_evidence", result["reason"])
 
     def test_illegal_transition_and_exclusivity(self) -> None:
         store, trust, memory, first, _second, memory_id = self._state_fixture()
@@ -216,6 +247,41 @@ class TMCDV2DatasetTests(unittest.TestCase):
         self.assertTrue(no_op_score["attack_success"])
         self.assertGreater(isolate_score["business_cost"], no_op_score["business_cost"])
         self.assertGreaterEqual(isolate_score["unauthorized_high_impact"], 1)
+
+
+class TMCDV2ReleaseTests(unittest.TestCase):
+    def test_training_feedback_does_not_call_v5c(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "scripts" / "vda_feedback_server.py").read_text(encoding="utf-8")
+        self.assertNotIn("select_candidate(", source)
+        self.assertIn('"v5c_used": False', source)
+
+    def test_rq6_same_state_layer_controls_are_registered(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "scripts" / "eval_tmcd_systems.py").read_text(encoding="utf-8")
+        for system in (
+            "react_base_tools",
+            "react_state_layer",
+            "trajectory_react_state_layer",
+            "agentguard_zero_train",
+            "agentguard_zero_full",
+        ):
+            self.assertIn(f'"{system}"', source)
+
+    def test_formal_jobs_are_single_node_four_gpu_jobs(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        jobs = root / "scripts" / "jobs"
+        expected = {
+            "tmcd_v2_4b_full_node175.dsub.sh": "cyclone001-agent-175",
+            "tmcd_v2_4b_append_only_node208.dsub.sh": "cyclone001-agent-208",
+            "tmcd_v2_9b_full_node217.dsub.sh": "cyclone001-agent-217",
+        }
+        for name, node in expected.items():
+            source = (jobs / name).read_text(encoding="utf-8")
+            self.assertIn('#DSUB -R "cpu=64;gpu=4;mem=230000"', source)
+            self.assertIn(node, source)
+            self.assertIn("--dca-steps 50", source)
+            self.assertIn("--vda-steps 75", source)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,18 @@ def _stable_id(prefix: str, payload: Any) -> str:
     return f"{prefix}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
 
 
+def _claim_identity(claim: Any) -> str:
+    if not isinstance(claim, dict):
+        return ""
+    normalized = {
+        key: str(claim.get(key, "")).strip().lower()
+        for key in ("entity_id", "predicate", "object", "scope")
+    }
+    if any(not value for value in normalized.values()):
+        return ""
+    return json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
 class EvidenceStore:
     """Public evidence ledger with availability time and minimal provenance lineage."""
 
@@ -33,6 +45,11 @@ class EvidenceStore:
             "public_payload": copy.deepcopy(public_event),
             "parent_evidence_ids": [],
             "root_source_ids": [source_id],
+            "claim_keys": [
+                claim_key
+                for claim_key in [_claim_identity(public_event.get("claim_semantics"))]
+                if claim_key
+            ],
             "created_at": int(time),
             "available_at": int(time),
             "integrity_status": "valid",
@@ -53,8 +70,12 @@ class EvidenceStore:
         tool = str(public_result.get("tool", "Tool"))
         source_id = str(public_result.get("verifier_id") or f"tool:{tool}")
         roots = {source_id}
+        claim_keys = {
+            _claim_identity(public_result.get("claim_semantics"))
+        } - {""}
         for parent in parents:
             roots.update(str(item) for item in self._records[parent].get("root_source_ids", []))
+            claim_keys.update(str(item) for item in self._records[parent].get("claim_keys", []))
         evidence_id = _stable_id(
             "tool",
             {"tool": tool, "time": time, "parents": parents, "payload": public_result},
@@ -67,6 +88,7 @@ class EvidenceStore:
             "public_payload": copy.deepcopy(public_result),
             "parent_evidence_ids": parents,
             "root_source_ids": sorted(roots),
+            "claim_keys": sorted(claim_keys),
             "created_at": int(time),
             "available_at": int(time) + 1,
             "integrity_status": "valid",
@@ -107,6 +129,27 @@ class EvidenceStore:
                 count += 1
         return count
 
+    def refs_support_claim(
+        self,
+        evidence_ids: Iterable[str],
+        claim: dict[str, Any],
+        *,
+        time: int,
+    ) -> tuple[bool, str]:
+        expected = _claim_identity(claim)
+        if not expected:
+            return False, "invalid_claim_semantics"
+        refs = list(evidence_ids or [])
+        if not refs:
+            return False, "missing_claim_evidence"
+        for evidence_id in refs:
+            record = self.get(str(evidence_id), time=time)
+            if record is None:
+                return False, f"unavailable_claim_evidence:{evidence_id}"
+            if expected not in set(record.get("claim_keys", [])):
+                return False, f"irrelevant_claim_evidence:{evidence_id}"
+        return True, "ok"
+
     def available_records(self, *, time: int) -> list[dict[str, Any]]:
         return [
             copy.deepcopy(record)
@@ -120,4 +163,3 @@ class EvidenceStore:
         for row in rows:
             assert_public(row)
         return rows
-

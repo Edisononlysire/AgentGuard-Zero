@@ -487,6 +487,12 @@ def main() -> None:
                             "AGZ_DCA_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU", "4"
                         ),
                         "AGZ_ROLLOUT_N": str(args.dca_rollout_n),
+                        "AGZ_MAX_PROMPT_LENGTH": os.environ.get(
+                            "AGZ_DCA_MAX_PROMPT_LENGTH", "2048"
+                        ),
+                        "AGZ_MAX_RESPONSE_LENGTH": os.environ.get(
+                            "AGZ_DCA_MAX_RESPONSE_LENGTH", "1024"
+                        ),
                         "AGZ_SEED": str(args.seed),
                         "AGZ_SAVE_FREQ": str(target_steps),
                         "AGZ_VDA_FEEDBACK_PORT_A": str(
@@ -563,8 +569,8 @@ def main() -> None:
                     "ppo_micro_batch_size_per_gpu": int(
                         os.environ.get("AGZ_DCA_PPO_MICRO_BATCH_SIZE_PER_GPU", "4")
                     ),
-                    "max_prompt_length": int(os.environ.get("AGZ_MAX_PROMPT_LENGTH", 896)),
-                    "max_response_length": int(os.environ.get("AGZ_MAX_RESPONSE_LENGTH", 512)),
+                    "max_prompt_length": int(os.environ.get("AGZ_DCA_MAX_PROMPT_LENGTH", 2048)),
+                    "max_response_length": int(os.environ.get("AGZ_DCA_MAX_RESPONSE_LENGTH", 1024)),
                     "rollout_temperature": float(os.environ.get("AGZ_ROLLOUT_TEMPERATURE", 0.7)),
                     "rollout_top_p": float(os.environ.get("AGZ_ROLLOUT_TOP_P", 1.0)),
                     "rollout_top_k": int(os.environ.get("AGZ_ROLLOUT_TOP_K", 0)),
@@ -633,9 +639,9 @@ def main() -> None:
                             "--seed",
                             str(args.seed + target_round * 1000),
                             "--max-input-tokens",
-                            os.environ.get("AGZ_DCA_MAX_PROMPT_LENGTH", "896"),
+                            os.environ.get("AGZ_DCA_MAX_PROMPT_LENGTH", "2048"),
                             "--max-new-tokens",
-                            os.environ.get("AGZ_DCA_MAX_RESPONSE_LENGTH", "512"),
+                            os.environ.get("AGZ_DCA_MAX_RESPONSE_LENGTH", "1024"),
                             "--temperature",
                             os.environ.get("AGZ_ROLLOUT_TEMPERATURE", "0.7"),
                             "--top-p",
@@ -733,8 +739,8 @@ def main() -> None:
                 round_steps=vda_round_steps,
             )
             if not training_done:
-                vda_action_tokens = 256
-                vda_observation_tokens = 384
+                vda_action_tokens = 384
+                vda_observation_tokens = 512
                 vda_trajectory_tokens = args.vda_max_turns * (
                     vda_action_tokens + vda_observation_tokens
                 )
@@ -830,9 +836,9 @@ def main() -> None:
                     "round_steps": vda_round_steps,
                     "max_turns": args.vda_max_turns,
                     "max_prompt_length": 2048,
-                    "max_trajectory_response_length": args.vda_max_turns * (256 + 384),
-                    "max_action_length": 256,
-                    "max_observation_length": 384,
+                    "max_trajectory_response_length": args.vda_max_turns * (384 + 512),
+                    "max_action_length": 384,
+                    "max_observation_length": 512,
                     "ppo_micro_batch_size_per_gpu": int(
                         os.environ.get(
                             "AGZ_VDA_PPO_MICRO_BATCH_SIZE_PER_GPU", "2"

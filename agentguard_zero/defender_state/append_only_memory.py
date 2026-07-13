@@ -39,6 +39,14 @@ class AppendOnlyProfileMemory(EvidenceStateMemory):
                 self.events.append(copy.deepcopy(result) | {"time": int(time)})
                 continue
             claim = copy.deepcopy(operation.get("claim", {}))
+            relevant, relevance_reason = evidence_store.refs_support_claim(
+                refs,
+                claim,
+                time=time,
+            )
+            if not relevant:
+                results.append({"committed": False, "op": op, "reason": relevance_reason})
+                continue
             claim_key = canonical_claim_key(claim)
             memory_id = self.claim_index.get(claim_key, self._memory_id(claim_key))
             target = str(operation.get("target_status", "quarantined"))

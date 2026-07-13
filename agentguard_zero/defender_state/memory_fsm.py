@@ -84,6 +84,14 @@ class EvidenceStateMemory:
 
             if op == "ingest":
                 claim = copy.deepcopy(operation.get("claim", {}))
+                relevant, relevance_reason = evidence_store.refs_support_claim(
+                    refs,
+                    claim,
+                    time=time,
+                )
+                if not relevant:
+                    results.append({"committed": False, "op": op, "reason": relevance_reason})
+                    continue
                 claim_key = canonical_claim_key(claim)
                 memory_id = self.claim_index.get(claim_key, self._memory_id(claim_key))
                 if memory_id not in self.records:
@@ -136,6 +144,21 @@ class EvidenceStateMemory:
                 results.append({"committed": False, "op": op, "reason": "unknown_memory_id"})
                 continue
             current = str(record["status"])
+            relevant, relevance_reason = evidence_store.refs_support_claim(
+                refs,
+                record.get("claim", {}),
+                time=time,
+            )
+            if not relevant:
+                results.append(
+                    {
+                        "committed": False,
+                        "op": op,
+                        "memory_id": memory_id,
+                        "reason": relevance_reason,
+                    }
+                )
+                continue
             event_id = str(operation.get("event_id", ""))
             claim_trust = trust_manager.claim_for(event_id) if event_id else None
             claim_score = float((claim_trust or {}).get("score", 0.0))

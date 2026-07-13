@@ -9,6 +9,7 @@ model and optionally applies AgentGuard-Zero-Select candidate selection.
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import datetime as _dt
 import json
@@ -936,6 +937,36 @@ class MockBackend:
         self.rng = random.Random(seed)
 
     def generate(self, messages: list[dict[str, str]], public_context: Any, n: int) -> list[str]:
+        context = public_context if isinstance(public_context, dict) else {}
+        observation = context.get("observation", context)
+        if isinstance(observation, dict) and observation.get("protocol_version") == "tmcd-v2":
+            from agentguard_zero.schemas.action_schema_v4 import DEFAULT_ACTION_PACKET_V4
+
+            events = observation.get("observed_events", []) or []
+            event = events[0] if events else {}
+            event_id = str(event.get("event_id", "event-0"))
+            packets = []
+            for tool, action in (
+                ("None", "Observe"),
+                ("CrossCheck", "CrossCheck"),
+                ("SourceChallenge", "SourceChallenge"),
+                ("DecoyProbe", "DecoyProbe"),
+                ("ProvenanceCheck", "ShadowBlock"),
+                ("None", "Isolate"),
+            ):
+                packet = copy.deepcopy(DEFAULT_ACTION_PACKET_V4)
+                packet["tool_call"] = {
+                    "name": tool,
+                    "args": {"event_id": event_id} if tool not in {"None", "DecoyProbe"} else ({"event_id": event_id, "zone": "server"} if tool == "DecoyProbe" else {}),
+                }
+                packet["response"] = {"tier": "L3" if action == "Isolate" else "L1", "action": action, "target": str(event.get("entity_id", "none"))}
+                packets.append(packet)
+            packets[-1]["safety_check"]["business_risk"] = 0.85
+            packets[-1]["safety_check"]["overresponse_risk"] = 0.90
+            texts = [json_dumps(packet) for packet in packets]
+            while len(texts) < n:
+                texts.append(json_dumps(DEFAULT_ACTION_PACKET_V4))
+            return texts[:n]
         event_ids = public_signals(public_context).get("event_ids") or ["event-0"]
         event_id = str(event_ids[0])
         packets = [

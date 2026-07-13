@@ -169,6 +169,8 @@ def _training_row(
     target_round: int,
     candidate_pool_path: Path,
     candidate_pool_sha: str,
+    dca_adapter_sha: str,
+    base_model_sha: str,
 ) -> dict[str, Any]:
     row = scenario_to_training_row(item["scenario"], split=split)
     extra = dict(row.get("extra_info", {}) or {})
@@ -186,6 +188,19 @@ def _training_row(
             "frontier_score": float(item["cfc"].get("frontier_score", 0.0)),
             "difficulty": float(item["cfc"].get("difficulty", 0.0)),
             "oracle_solvable": bool(item["cfc"].get("oracle_solvable", False)),
+            "protocol_version": "tmcd-v2",
+            "schema_version": int(item["scenario"].get("schema_version", 4)),
+            "generator_checkpoint_hash": dca_manifest_sha,
+            "base_model_hash": base_model_sha,
+            "adapter_hash": dca_adapter_sha,
+            "seed": int(item["scenario"].get("metadata", {}).get("generation_seed", 0)),
+            "scenario_family": str(item["scenario"].get("scenario_family", "")),
+            "parent_scenario_id": str(
+                item["scenario"].get("metadata", {}).get("derived_from_scenario_id", "")
+            ),
+            "split": split,
+            "fingerprint": item["scenario_fingerprint"],
+            "creation_time": str(item["scenario"].get("metadata", {}).get("generated_at", "")),
         }
     )
     row["extra_info"] = extra
@@ -358,6 +373,8 @@ def main() -> None:
                 target_round=target_round,
                 candidate_pool_path=candidate_path,
                 candidate_pool_sha=candidate_pool_sha,
+                dca_adapter_sha=str(dca_manifest.get("adapter_sha256", "")),
+                base_model_sha=str(dca_manifest.get("base_model", {}).get("identity_sha256", "")),
             )
             for item in items
         ]

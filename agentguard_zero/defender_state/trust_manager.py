@@ -86,6 +86,7 @@ class ContextualTrustManager:
             "graph_support": 0.0,
             "contradiction_score": 0.0,
             "evidence_refs": [],
+            "claim_semantics": copy.deepcopy(public_event.get("claim_semantics", {})),
             "updated_at": int(time),
         }
 
@@ -167,6 +168,18 @@ class ContextualTrustManager:
                 committed.append({"committed": False, "op": op, "reason": reason})
                 continue
             registered_claim = self.claim_trust.get(event_id) if event_id else None
+            if op != "hold" and registered_claim is None:
+                committed.append(
+                    {
+                        "committed": False,
+                        "op": op,
+                        "source_id": source_id,
+                        "event_id": event_id,
+                        "reason": "unknown_claim_event",
+                        "time": int(time),
+                    }
+                )
+                continue
             if registered_claim is not None and str(registered_claim.get("source_id")) != source_id:
                 committed.append(
                     {
@@ -179,6 +192,24 @@ class ContextualTrustManager:
                     }
                 )
                 continue
+            if op != "hold":
+                relevant, relevance_reason = evidence_store.refs_support_claim(
+                    refs,
+                    registered_claim.get("claim_semantics", {}),
+                    time=time,
+                )
+                if not relevant:
+                    committed.append(
+                        {
+                            "committed": False,
+                            "op": op,
+                            "source_id": source_id,
+                            "event_id": event_id,
+                            "reason": relevance_reason,
+                            "time": int(time),
+                        }
+                    )
+                    continue
             source = self.ensure_source(source_id, time=time)
             self._decay_source(source, time=time)
             records = [record for ref in refs if (record := evidence_store.get(ref, time=time)) is not None]
