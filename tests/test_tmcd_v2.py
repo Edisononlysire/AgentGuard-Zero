@@ -283,6 +283,19 @@ class TMCDV2ReleaseTests(unittest.TestCase):
             self.assertIn("--dca-steps 50", source)
             self.assertIn("--vda-steps 75", source)
 
+    def test_preflight_freezes_and_imports_training_framework(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        prepare_source = (root / "scripts" / "prepare_tmcd_v2_run.py").read_text(
+            encoding="utf-8"
+        )
+        preflight_source = (root / "scripts" / "preflight_tmcd_v2_job.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("third_party/verl_tool/trainer/main_ppo.py", prepare_source)
+        self.assertIn("third_party/verl/verl/trainer/main_ppo.py", prepare_source)
+        self.assertIn("import verl; import verl_tool.trainer.main_ppo", preflight_source)
+        self.assertIn("training framework hash mismatch", preflight_source)
+
 
 if __name__ == "__main__":
     unittest.main()

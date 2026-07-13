@@ -25,6 +25,11 @@ MANIFEST_NAMES = (
     "schema_versions.json",
 )
 
+TRAINING_FRAMEWORK_FILES = (
+    "third_party/verl_tool/trainer/main_ppo.py",
+    "third_party/verl/verl/trainer/main_ppo.py",
+)
+
 
 def _git(args: list[str]) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
@@ -70,6 +75,12 @@ def main() -> None:
             raise SystemExit(f"frozen manifest differs from source: {target}")
         shutil.copy2(source_path, target)
         copied[name] = {"path": str(target), "sha256": sha256_file(target)}
+    training_framework = {}
+    for relative_path in TRAINING_FRAMEWORK_FILES:
+        framework_path = root / relative_path
+        if not framework_path.is_file():
+            raise SystemExit(f"missing training framework entry point: {framework_path}")
+        training_framework[relative_path] = sha256_file(framework_path)
     source_manifest = {
         "protocol_version": "tmcd-v2",
         "kind": "source_freeze",
@@ -79,6 +90,7 @@ def main() -> None:
         "git_dirty": bool(dirty),
         "source_tree_sha256": sha256_tree(root / "agentguard_zero"),
         "scripts_tree_sha256": sha256_tree(root / "scripts"),
+        "training_framework": training_framework,
         "manifests": copied,
     }
     target = destination / "source_freeze.json"

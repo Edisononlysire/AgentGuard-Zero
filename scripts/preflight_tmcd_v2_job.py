@@ -62,8 +62,26 @@ def main() -> None:
     protocol = json.loads((frozen / "protocol.json").read_text(encoding="utf-8"))
     if protocol.get("protocol_version") != "tmcd-v2":
         raise SystemExit("frozen protocol version mismatch")
+    source_freeze = json.loads((frozen / "source_freeze.json").read_text(encoding="utf-8"))
+    framework_files = source_freeze.get("training_framework", {})
+    if not framework_files:
+        raise SystemExit("source freeze does not record the training framework")
+    for relative_path, expected_sha256 in framework_files.items():
+        framework_path = ROOT / relative_path
+        if not framework_path.is_file():
+            raise SystemExit(f"missing training framework file: {framework_path}")
+        if sha256_file(framework_path) != expected_sha256:
+            raise SystemExit(f"training framework hash mismatch: {framework_path}")
 
     test_output = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"])
+    framework_import = _run(
+        [
+            sys.executable,
+            "-s",
+            "-c",
+            "import verl; import verl_tool.trainer.main_ppo; print('verl_tool_import_ok')",
+        ]
+    )
     smoke_path = Path(args.output).resolve().with_name("protocol_smoke.json")
     smoke_output = _run(
         [
@@ -98,6 +116,7 @@ def main() -> None:
         "source_freeze_sha256": sha256_file(frozen / "source_freeze.json"),
         "unit_tests": "passed",
         "unit_test_output_tail": test_output.splitlines()[-5:],
+        "training_framework_import": framework_import.splitlines()[-5:],
         "protocol_smoke": json.loads(smoke_path.read_text(encoding="utf-8")),
         "protocol_smoke_stdout_tail": smoke_output.splitlines()[-5:],
     }
