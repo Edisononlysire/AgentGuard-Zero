@@ -264,6 +264,13 @@ class TMCDV2ReleaseTests(unittest.TestCase):
         self.assertNotIn("select_candidate(", source)
         self.assertIn('"v5c_used": False', source)
 
+    def test_dca_reward_normalizes_untrusted_metadata_before_hard_check(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "curriculum" / "reward_function" / "dca_online_reward.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('_as_dict(scenario.get("metadata"))', source)
+
     def test_rq6_same_state_layer_controls_are_registered(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "scripts" / "eval_tmcd_systems.py").read_text(encoding="utf-8")

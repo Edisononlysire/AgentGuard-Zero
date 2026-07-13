@@ -187,7 +187,7 @@ def compute_score(
     for index, (solution, raw_extra) in enumerate(zip(solutions, extras)):
         extra = _as_dict(raw_extra)
         scenario, parse_ok, parse_message = _extract_json_object(str(solution))
-        metadata = dict(scenario.get("metadata", {}) or {}) if scenario else {}
+        metadata = _as_dict(scenario.get("metadata")) if scenario else {}
         metadata.update(
             {
                 "feedback_candidate": True,
