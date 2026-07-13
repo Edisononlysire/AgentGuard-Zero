@@ -222,6 +222,14 @@ class TMCDV2DatasetTests(unittest.TestCase):
         generated = paired_counterpart_v2(first)
         self.assertEqual(validate_pair_v2(first, generated), (True, "ok"))
 
+    def test_t2_prefix_hash_is_total_for_malformed_candidates(self) -> None:
+        scenario = minimal_example_v2(trajectory_type="betrayal")
+        scenario["source_profiles"][0]["public_prior"] = [0.5]
+        scenario["event_schedule"][0]["time"] = [0]
+        value = public_prefix_hash(scenario)
+        self.assertEqual(len(value), 64)
+        self.assertEqual(value, public_prefix_hash(scenario))
+
     def test_ood_family_is_blocked_from_training(self) -> None:
         scenario = minimal_example_v2()
         scenario["scenario_family"] = sorted(OOD_FAMILIES)[0]

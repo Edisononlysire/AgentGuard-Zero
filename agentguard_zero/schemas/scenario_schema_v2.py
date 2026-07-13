@@ -145,21 +145,41 @@ def minimal_example_v2(*, trajectory_type: str = "betrayal") -> dict[str, Any]:
 
 
 def public_prefix_hash(scenario: dict[str, Any]) -> str:
-    divergence = int(scenario.get("divergence_time", 0))
+    def safe_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def safe_prior(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    divergence = safe_int(scenario.get("divergence_time", 0), 0)
+    raw_events = scenario.get("event_schedule", [])
+    if not isinstance(raw_events, list):
+        raw_events = []
     events = [
         project_event(event)
-        for event in scenario.get("event_schedule", [])
-        if int(event.get("time", -1)) < divergence
+        for event in raw_events
+        if isinstance(event, dict)
+        and safe_int(event.get("time", divergence), divergence) < divergence
     ]
+    raw_profiles = scenario.get("source_profiles", [])
+    if not isinstance(raw_profiles, list):
+        raw_profiles = []
     payload = {
         "network_context": scenario.get("network_context", {}),
         "defense_constraints": scenario.get("defense_constraints", {}),
         "source_profiles": [
             {
                 "source_id": str(profile.get("source_id", "")),
-                "public_prior": float(profile.get("public_prior", 0.5)),
+                "public_prior": safe_prior(profile.get("public_prior", 0.5)),
             }
-            for profile in scenario.get("source_profiles", [])
+            for profile in raw_profiles
+            if isinstance(profile, dict)
         ],
         "events": events,
     }
