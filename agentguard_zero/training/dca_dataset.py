@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import random
@@ -22,7 +23,7 @@ TASK_FOCI = (
     "T4 Business-Constrained Overresponse Induction",
 )
 
-DCA_PROMPT_VERSION = 4
+DCA_PROMPT_VERSION = 5
 
 
 FOCUS_REQUIREMENTS = {
@@ -49,8 +50,52 @@ FOCUS_FAMILIES = {
 }
 
 
+def task_example_v2(task_focus: str) -> dict[str, Any]:
+    """Return a compact, hard-gate-valid example for the requested task."""
+
+    task_id = task_focus.split()[0]
+    scenario = minimal_example_v2(trajectory_type="betrayal")
+    scenario["scenario_id"] = f"TMCD-V2-{task_id}-SCHEMA-EXAMPLE"
+    scenario["scenario_family"] = FOCUS_FAMILIES.get(
+        task_focus, "active_probe_ambiguity"
+    )
+    scenario["metadata"] = {
+        "task_id": task_id,
+        "manipulation_family": scenario["scenario_family"],
+    }
+    if task_id == "T2":
+        return scenario
+
+    for key in ("pair_id", "prefix_hash", "divergence_time", "trajectory_type"):
+        scenario.pop(key, None)
+
+    if task_id == "T1":
+        ambiguous = scenario["event_schedule"][1]
+        ambiguous["truth_value"] = False
+        ambiguous["is_fake"] = True
+        ambiguous["spoofability"] = 0.65
+    elif task_id == "T3":
+        second = copy.deepcopy(scenario["event_schedule"][2])
+        second["event_id"] = "event-poison-profile-2"
+        second["time"] = 1
+        second["claim"] = "database profile risk is low"
+        second["claim_semantics"]["predicate"] = "asset_risk_level"
+        second["claim_semantics"]["object"] = "low"
+        second["truth_value"] = False
+        second["is_fake"] = True
+        scenario["event_schedule"].insert(2, second)
+    elif task_id == "T4":
+        pressure = scenario["event_schedule"][2]
+        pressure["claim"] = "urgent isolation requested for critical database"
+        pressure["truth_value"] = False
+        pressure["is_fake"] = True
+        pressure["spoofability"] = 0.85
+        scenario["defense_constraints"]["business_budget"] = 0.8
+    return scenario
+
+
 def build_dca_messages(task_focus: str, nonce: int | None = None) -> list[dict[str, str]]:
-    example_value = minimal_example_v2()
+    example_value = task_example_v2(task_focus)
     example = json.dumps(example_value, ensure_ascii=False, separators=(",", ":"))
     forbidden_families = ", ".join(sorted(OOD_FAMILIES))
     system = (
@@ -62,6 +107,7 @@ def build_dca_messages(task_focus: str, nonce: int | None = None) -> list[dict[s
         "Use only these exact objective enum values: exfiltration, sabotage, persistence, credential_theft. "
         "Use only these exact phase enum values: initial_access, discovery, lateral_movement, collection, "
         "exfiltration, impact, persistence. Never invent synonyms for these enums. "
+        "Use only these exact source behavior mode values: honest, deceptive, mixed, legitimate_change, recovered. "
         "Required top-level keys are protocol_version, schema_version, scenario_id, scenario_family, distribution, split, "
         "network_context, true_attack, source_profiles, event_schedule, defense_constraints, oracle, and metadata. "
         "Each source profile contains source_id, public_prior, and a hidden behavior_schedule. Each event contains event_id, time, type, source_id, entity_id, claim, "

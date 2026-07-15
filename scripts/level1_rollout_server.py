@@ -14,7 +14,7 @@ import copy
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -102,12 +102,22 @@ class TrajectoryState:
     invalid_count: int = 0
     done: bool = False
     final_score: dict[str, Any] | None = None
+    presented_evidence_ids: set[str] = field(default_factory=set)
+    last_defender_state: dict[str, Any] = field(default_factory=dict)
 
 
 class Level1RolloutStore:
-    def __init__(self, invalid_penalty: float = 0.5, max_states: int = 4096):
+    def __init__(
+        self,
+        invalid_penalty: float = 0.5,
+        max_states: int = 4096,
+        defender_checkpoint_interval: int = 8,
+    ):
         self.invalid_penalty = invalid_penalty
         self.max_states = max_states
+        if defender_checkpoint_interval <= 0:
+            raise ValueError("defender checkpoint interval must be positive")
+        self.defender_checkpoint_interval = defender_checkpoint_interval
         self._lock = threading.Lock()
         self._states: dict[str, TrajectoryState] = {}
 
@@ -164,8 +174,24 @@ class Level1RolloutStore:
             max_steps_int = None
         env = instantiate_scenario(scenario, max_steps=max_steps_int)
         state = TrajectoryState(trajectory_id=trajectory_id, scenario=scenario, env=env)
+        initial_observation = env.observe()
+        state.presented_evidence_ids.update(
+            str(row.get("evidence_id", ""))
+            for row in initial_observation.get("available_evidence", [])
+            if isinstance(row, dict) and row.get("evidence_id")
+        )
+        state.last_defender_state = copy.deepcopy(
+            initial_observation.get("defender_state", {})
+        )
         self._states[trajectory_id] = state
         return state
+
+    @staticmethod
+    def _comparable_defender_section(name: str, value: Any) -> Any:
+        comparable = copy.deepcopy(value)
+        if name == "memory" and isinstance(comparable, dict):
+            comparable.pop("retrieval_id", None)
+        return comparable
 
     def _step_state(
         self,
@@ -261,9 +287,43 @@ class Level1RolloutStore:
         finish: bool,
     ) -> dict[str, Any]:
         env = state.env
+        continuation = copy.deepcopy(next_obs)
+        evidence = continuation.get("available_evidence", []) or []
+        new_evidence = [
+            row
+            for row in evidence
+            if isinstance(row, dict)
+            and str(row.get("evidence_id", "")) not in state.presented_evidence_ids
+        ]
+        state.presented_evidence_ids.update(
+            str(row.get("evidence_id", ""))
+            for row in new_evidence
+            if row.get("evidence_id")
+        )
+        continuation["available_evidence"] = new_evidence
+        current_defender = copy.deepcopy(continuation.get("defender_state", {}))
+        force_checkpoint = state.steps % self.defender_checkpoint_interval == 0
+        delivered_defender: dict[str, Any] = {}
+        retained_sections: list[str] = []
+        for name, value in current_defender.items():
+            previous = state.last_defender_state.get(name)
+            changed = self._comparable_defender_section(
+                name, value
+            ) != self._comparable_defender_section(name, previous)
+            if force_checkpoint or changed:
+                delivered_defender[name] = value
+            else:
+                retained_sections.append(name)
+        continuation["defender_state"] = delivered_defender
+        continuation["observation_mode"] = (
+            "continuation_checkpoint" if force_checkpoint else "continuation_delta"
+        )
+        if retained_sections:
+            continuation["retained_defender_sections"] = retained_sections
+        state.last_defender_state = current_defender
         obs_payload = {
             "time": getattr(env, "t", state.steps),
-            "observation": next_obs,
+            "observation": continuation,
             "costs": {
                 "business_cost": float(getattr(env, "business_cost", 0.0)),
                 "verification_cost": float(getattr(env, "verification_cost", 0.0)),

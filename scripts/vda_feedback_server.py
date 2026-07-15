@@ -8,8 +8,10 @@ import copy
 import json
 import os
 import random
+import time
 import sys
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ for path in (ROOT, ROOT / "scripts"):
         sys.path.insert(0, str(path))
 
 from agentguard_zero.training.vda_dataset import scenario_to_training_row
+from agentguard_zero.variants import TRAINING_VARIANTS
 from eval_level1_select import (
     ACTIVE_PROBE_ACTIONS,
     ACTIVE_PROBE_TOOLS,
@@ -111,15 +114,36 @@ def _history_summary(
     }
 
 
+CURRENT_DECISION_MARKER = "Current decision instance:"
+
+
+def _instruction_messages(initial_messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    instructions: list[dict[str, str]] = []
+    for message in initial_messages:
+        content = str(message.get("content", ""))
+        if message.get("role") == "user" and CURRENT_DECISION_MARKER in content:
+            content = content.partition(CURRENT_DECISION_MARKER)[0].rstrip()
+        if content:
+            instructions.append(
+                {"role": str(message.get("role", "user")), "content": content}
+            )
+    return instructions or initial_messages
+
+
 def _generation_messages(state: dict[str, Any]) -> list[dict[str, str]]:
     initial_messages = state["initial_messages"]
     if not state["history"]:
         return initial_messages
+    base_messages = (
+        state["instruction_messages"]
+        if state["continuation_prompt_mode"] == "snapshot"
+        else initial_messages
+    )
     continuation = {
         "history": state["history"],
         "current_public_state": state["public_context"],
     }
-    return initial_messages + [
+    return base_messages + [
         {
             "role": "user",
             "content": (
@@ -147,6 +171,26 @@ def _ambiguity_penalty(scenario: dict[str, Any]) -> float:
     if claims and max(map(len, claims)) < 12:
         penalty += 0.25
     return min(1.0, penalty)
+
+
+def _safe_cfc_metrics(scenario: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return compute_cfc_metrics(scenario)
+    except Exception as exc:
+        message = f"cfc_exception:{type(exc).__name__}:{exc}"
+        return {
+            "all_ok": False,
+            "checks": {
+                "format": {"ok": False, "message": message},
+                "valid": {"ok": False, "message": message},
+                "solvable": {"ok": False, "message": message},
+                "safe": {"ok": True, "message": "ok"},
+                "all_ok": False,
+            },
+            "oracle_solvable": False,
+            "frontier_score": 0.0,
+            "feedback_error": message,
+        }
 
 
 def _action_metrics(result: dict[str, Any]) -> dict[str, Any]:
@@ -180,7 +224,16 @@ def _action_metrics(result: dict[str, Any]) -> dict[str, Any]:
                 "parse_ok": bool(selected.get("selected_ok", False)),
             }
         )
+    parse_errors: dict[str, int] = {}
+    for selected in result.get("selected_actions", []) or []:
+        if bool(selected.get("selected_ok", False)):
+            continue
+        message = str(selected.get("parse_msg", "unknown"))
+        parse_errors[message] = parse_errors.get(message, 0) + 1
     return {
+        "current_vda_action_count": len(summaries),
+        "current_vda_parse_ok_count": sum(int(item["parse_ok"]) for item in summaries),
+        "current_vda_parse_error_counts": parse_errors,
         "current_vda_active_probe_count": active,
         "current_vda_passive_verify_count": passive,
         "current_vda_quarantine_count": quarantined,
@@ -275,10 +328,13 @@ class FeedbackEngine:
             messages, public_context = sanitize_initial_messages(as_messages(row.get("problem", "")))
             extra = scenario_extra_from_row(row)
             max_env_steps = int(extra.get("max_env_steps", self.args.max_turns))
+            instruction_messages = _instruction_messages(messages)
             states.append(
                 {
                     "scenario": scenario,
                     "initial_messages": messages,
+                    "instruction_messages": instruction_messages,
+                    "continuation_prompt_mode": self.args.continuation_prompt_mode,
                     "public_context": public_context,
                     "history": [],
                     "extra": extra,
@@ -289,6 +345,7 @@ class FeedbackEngine:
                     "selected_actions": [],
                     "final_observation": None,
                     "done": False,
+                    "invalid_streak": 0,
                 }
             )
 
@@ -318,6 +375,10 @@ class FeedbackEngine:
                     selector_score=0.0,
                     diagnostics={"policy": "train_only_direct", "v5c_used": False},
                 )
+                if selected.ok:
+                    state["invalid_streak"] = 0
+                else:
+                    state["invalid_streak"] += 1
                 selected_values.append(selected)
                 state["selected_actions"].append(
                     {
@@ -333,7 +394,15 @@ class FeedbackEngine:
                     "trajectory_ids": [states[index]["trajectory_id"] for index in active],
                     "actions": [selected.text for selected in selected_values],
                     "finish": [False for _ in active],
-                    "is_last_step": [turn + 1 >= states[index]["max_turns"] for index in active],
+                    "is_last_step": [
+                        turn + 1 >= states[index]["max_turns"]
+                        or (
+                            self.args.invalid_action_patience > 0
+                            and states[index]["invalid_streak"]
+                            >= self.args.invalid_action_patience
+                        )
+                        for index in active
+                    ],
                     "extra_fields": [states[index]["extra"] for index in active],
                 }
             )
@@ -416,6 +485,7 @@ class FeedbackEngine:
         }
 
     def evaluate_many(self, scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        started_at = time.perf_counter()
         prepared = []
         for scenario in scenarios:
             value = copy.deepcopy(scenario)
@@ -424,7 +494,7 @@ class FeedbackEngine:
             value["metadata"] = metadata
             prepared.append(value)
         scenarios = prepared
-        cfcs = [compute_cfc_metrics(scenario) for scenario in scenarios]
+        cfcs = [_safe_cfc_metrics(scenario) for scenario in scenarios]
         solvable_indices = [
             index for index, cfc in enumerate(cfcs) if cfc.get("oracle_solvable", False)
         ]
@@ -444,10 +514,33 @@ class FeedbackEngine:
             rollout_by_index = dict(zip(solvable_indices, rollouts))
         else:
             self.request_count += len(scenarios)
-        return [
+        results = [
             self._combine(scenario, cfcs[index], rollout_by_index.get(index))
             for index, scenario in enumerate(scenarios)
         ]
+        print(
+            json.dumps(
+                {
+                    "event": "feedback_batch",
+                    "attention": self.args.attn_implementation,
+                    "continuation_prompt_mode": self.args.continuation_prompt_mode,
+                    "invalid_action_patience": self.args.invalid_action_patience,
+                    "scenarios": len(scenarios),
+                    "rollouts": len(solvable_indices),
+                    "cfc_errors": sum(int("feedback_error" in item) for item in cfcs),
+                    "actions": sum(
+                        int(item.get("current_vda_action_count", 0)) for item in results
+                    ),
+                    "parse_ok_actions": sum(
+                        int(item.get("current_vda_parse_ok_count", 0)) for item in results
+                    ),
+                    "elapsed_s": round(time.perf_counter() - started_at, 6),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return results
 
     def evaluate(self, scenario: dict[str, Any]) -> dict[str, Any]:
         return self.evaluate_many([scenario])[0]
@@ -502,6 +595,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.engine.evaluate(scenario)
                 self._write(200, {"ok": True, "result": result})
         except Exception as exc:
+            traceback.print_exc()
             self._write(500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -517,12 +611,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260709)
     parser.add_argument(
         "--experiment-variant",
-        choices=["full", "append_only_memory"],
+        choices=TRAINING_VARIANTS,
         default=os.environ.get("AGZ_EXPERIMENT_VARIANT", "full"),
     )
     parser.add_argument("--max-turns", type=int, default=6)
     parser.add_argument("--max-input-tokens", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument(
+        "--continuation-prompt-mode",
+        choices=["legacy", "snapshot"],
+        default="legacy",
+    )
+    parser.add_argument("--invalid-action-patience", type=int, default=0)
     parser.add_argument(
         "--stop-on-complete-json",
         action=argparse.BooleanOptionalAction,
@@ -545,6 +645,8 @@ def parse_args() -> argparse.Namespace:
         help="Move VDA weights to CPU after each feedback batch so DCA update owns GPU memory.",
     )
     args = parser.parse_args()
+    if args.invalid_action_patience < 0:
+        parser.error("--invalid-action-patience must be non-negative")
 
     # Namespace fields shared with scripts/eval_level1_select.py.
     args.model_path = args.model_path
@@ -555,7 +657,7 @@ def parse_args() -> argparse.Namespace:
     args.attn_implementation = args.attn_implementation
     args.policy = "zero_shot_vda"
     args.candidate_count = 1
-    args.selector_mode = "v5_c_frontier_minimax"
+    args.selector_mode = "v5_c_evidence_governor"
     args.run_name = f"dca-feedback-{args.port}"
     args.invalid_penalty = 0.5
     return args

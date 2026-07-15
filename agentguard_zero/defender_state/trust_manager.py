@@ -15,10 +15,6 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, float(value)))
 
 
-def _assurance_prior(level: str) -> float:
-    return {"high": 0.70, "medium": 0.55, "low": 0.40}.get(str(level), 0.50)
-
-
 def _evidence_signal(record: dict[str, Any]) -> tuple[float, float]:
     payload = record.get("public_payload", {}) or {}
     verdict = str(payload.get("verdict", "")).lower()
@@ -45,6 +41,7 @@ class ContextualTrustManager:
         self.source_reputation: dict[str, dict[str, Any]] = {}
         self.claim_trust: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
+        self.applied_trust_evidence: set[tuple[str, str]] = set()
 
     def ensure_source(self, source_id: str, *, public_prior: float = 0.5, time: int = 0) -> dict[str, Any]:
         source_id = str(source_id or "unknown")
@@ -66,14 +63,20 @@ class ContextualTrustManager:
             }
         return self.source_reputation[source_id]
 
-    def register_claim(self, public_event: dict[str, Any], *, time: int) -> None:
+    def register_claim(
+        self,
+        public_event: dict[str, Any],
+        *,
+        time: int,
+        public_prior: float = 0.5,
+    ) -> None:
         event_id = str(public_event.get("event_id", ""))
         if not event_id or event_id in self.claim_trust:
             return
         source_id = str(public_event.get("source_id") or public_event.get("source") or "unknown")
         source = self.ensure_source(
             source_id,
-            public_prior=_assurance_prior(str(public_event.get("source_assurance_level", "unknown"))),
+            public_prior=public_prior,
             time=time,
         )
         self.claim_trust[event_id] = {
@@ -210,9 +213,32 @@ class ContextualTrustManager:
                         }
                     )
                     continue
+            credibility_ops = {"support", "contradict", "recover"}
+            fresh_refs = [
+                ref
+                for ref in refs
+                if op not in credibility_ops or (source_id, ref) not in self.applied_trust_evidence
+            ]
+            if op in credibility_ops and not fresh_refs:
+                event = {
+                    "committed": False,
+                    "op": op,
+                    "source_id": source_id,
+                    "event_id": event_id,
+                    "evidence_refs": refs,
+                    "reason": "duplicate_trust_evidence",
+                    "time": int(time),
+                }
+                committed.append(event)
+                self.events.append(copy.deepcopy(event))
+                continue
             source = self.ensure_source(source_id, time=time)
             self._decay_source(source, time=time)
-            records = [record for ref in refs if (record := evidence_store.get(ref, time=time)) is not None]
+            records = [
+                record
+                for ref in fresh_refs
+                if (record := evidence_store.get(ref, time=time)) is not None
+            ]
             positive, negative = 0.0, 0.0
             for record in records:
                 pos, neg = _evidence_signal(record)
@@ -238,7 +264,7 @@ class ContextualTrustManager:
                     source["support_streak"] = 0
                     source["last_conflict_at"] = int(time)
             elif op == "recover":
-                allowed = evidence_store.independent_count(refs, time=time) >= 2 and positive > negative
+                allowed = evidence_store.independent_count(fresh_refs, time=time) >= 2 and positive > negative
                 reason = "recover_requires_two_independent_supports" if not allowed else "ok"
                 if allowed:
                     source["alpha"] += min(2.0, positive)
@@ -253,18 +279,25 @@ class ContextualTrustManager:
                 reason = "invalid_trust_operation"
 
             if allowed:
+                if op in credibility_ops:
+                    self.applied_trust_evidence.update((source_id, ref) for ref in fresh_refs)
                 source["last_updated_at"] = int(time)
                 self._refresh_source(source)
                 if event_id and event_id in self.claim_trust:
                     claim = self.claim_trust[event_id]
                     claim["evidence_refs"] = sorted(set(claim.get("evidence_refs", [])) | set(refs))
-                    self._refresh_claim(claim, source, records, time=time)
+                    cumulative_records = [
+                        record
+                        for ref in claim["evidence_refs"]
+                        if (record := evidence_store.get(ref, time=time)) is not None
+                    ]
+                    self._refresh_claim(claim, source, cumulative_records, time=time)
             event = {
                 "committed": bool(allowed),
                 "op": op,
                 "source_id": source_id,
                 "event_id": event_id,
-                "evidence_refs": refs,
+                "evidence_refs": fresh_refs if op in credibility_ops else refs,
                 "reason": reason,
                 "time": int(time),
             }
@@ -277,7 +310,46 @@ class ContextualTrustManager:
         return copy.deepcopy(value) if value is not None else None
 
     def public_snapshot(self) -> dict[str, Any]:
+        def public_source(source: dict[str, Any]) -> dict[str, Any]:
+            row = {
+                "mean": float(source.get("mean", 0.5)),
+                "uncertainty": float(source.get("uncertainty", 1.0)),
+                "status": str(source.get("status", "uncertain")),
+            }
+            for key in ("last_verified_at", "last_conflict_at"):
+                if source.get(key) is not None:
+                    row[key] = int(source[key])
+            for key in ("support_streak", "conflict_streak", "recovery_streak"):
+                if int(source.get(key, 0)):
+                    row[key] = int(source[key])
+            return row
+
+        def public_claim(claim: dict[str, Any]) -> dict[str, Any]:
+            row = {
+                "source_id": str(claim.get("source_id", "unknown")),
+                "score": float(claim.get("score", 0.0)),
+                "status": str(claim.get("status", "unassessed")),
+                "updated_at": int(claim.get("updated_at", 0)),
+            }
+            for key in (
+                "provenance_score",
+                "cross_source_support",
+                "graph_support",
+                "contradiction_score",
+            ):
+                if float(claim.get(key, 0.0)):
+                    row[key] = float(claim[key])
+            if claim.get("evidence_refs"):
+                row["evidence_refs"] = copy.deepcopy(claim["evidence_refs"])
+            return row
+
         return {
-            "source_reputation": copy.deepcopy(self.source_reputation),
-            "current_claim_trust": copy.deepcopy(self.claim_trust),
+            "source_reputation": {
+                source_id: public_source(source)
+                for source_id, source in self.source_reputation.items()
+            },
+            "current_claim_trust": {
+                event_id: public_claim(claim)
+                for event_id, claim in self.claim_trust.items()
+            },
         }

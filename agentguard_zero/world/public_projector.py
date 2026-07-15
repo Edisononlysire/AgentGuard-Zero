@@ -9,29 +9,29 @@ FORBIDDEN_PUBLIC_KEYS = frozenset(
         "is_fake",
         "truth_value",
         "true_objective",
+        "true_attack",
         "oracle",
         "oracle_label",
         "oracle_objective",
+        "ground_truth",
+        "hidden",
+        "hidden_state",
         "hidden_source_behavior",
         "hidden_behavior_state",
         "behavior_schedule",
         "future_schedule",
         "spoofability",
+        "source_assurance_level",
+        "scenario_id",
+        "scenario_family",
+        "pair_id",
+        "prefix_hash",
+        "trajectory_type",
+        "task_id",
+        "task_focus",
+        "metadata",
     }
 )
-
-
-def assurance_level(spoofability: Any) -> str:
-    """Convert a hidden continuous spoofability value to a coarse public prior."""
-    try:
-        value = float(spoofability)
-    except (TypeError, ValueError):
-        return "unknown"
-    if value <= 0.33:
-        return "high"
-    if value <= 0.66:
-        return "medium"
-    return "low"
 
 
 def project_public(value: Any, forbidden_keys: Iterable[str] = FORBIDDEN_PUBLIC_KEYS) -> Any:
@@ -45,8 +45,6 @@ def project_public(value: Any, forbidden_keys: Iterable[str] = FORBIDDEN_PUBLIC_
         return copy.deepcopy(value)
 
     projected: dict[str, Any] = {}
-    if "spoofability" in value and "source_assurance_level" not in value:
-        projected["source_assurance_level"] = assurance_level(value.get("spoofability"))
     for key, item in value.items():
         if str(key) in forbidden:
             continue
@@ -78,4 +76,3 @@ def project_event(internal_event: dict[str, Any]) -> dict[str, Any]:
     public = project_public(internal_event)
     assert_public(public)
     return public
-

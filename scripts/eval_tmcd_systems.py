@@ -35,7 +35,7 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 import eval_level1_select as base
-from agentguard_zero.governance.v5c import score_v5c_candidate
+from agentguard_zero.governance.v5c import score_v5c_candidate, select_v5c_json
 from agentguard_zero.schemas.action_schema_v4 import parse_action_json_v4
 from agentguard_zero.training.vda_dataset import scenario_to_training_row
 from level1_rollout_server import Level1RolloutStore
@@ -54,26 +54,31 @@ SYSTEMS = [
     "qwen_zero_shot_vda",
     "agentguard_zero_select",
     "agentguard_zero_train",
-    "agentguard_zero_train_select",
+    "agentguard_zero_train_random_k",
+    "agentguard_zero_train_generic_best_of_k",
+    "agentguard_zero_train_soft_v5c",
     "agentguard_zero_full",
     "oracle_defender",
 ]
 
 INTERNAL_SYSTEMS = {"random_policy"}
+SYSTEM_ALIASES = {"agentguard_zero_train_select": "agentguard_zero_full"}
 
 SYSTEM_DISPLAY = {
     "rule_based_soc": "Rule-based SOC",
     "react_base_tools": "ReAct / Base+Tools",
     "react_state_layer": "Qwen ReAct + Defender State Layer",
     "trajectory_react_state_layer": "Trajectory-trained ReAct + Defender State Layer",
-    "memory_agent": "Memory Agent",
-    "trust_score_agent": "Trust-score Agent",
+    "memory_agent": "Unfiltered Memory Agent",
+    "trust_score_agent": "Heuristic Trust Agent",
     "cyber_llm_vda": "Cyber LLM VDA",
     "lily_cybersecurity_vda": "Lily-Cybersecurity-7B VDA",
     "qwen_zero_shot_vda": "Qwen Zero-shot VDA",
     "agentguard_zero_select": "AgentGuard-Zero-Select",
     "agentguard_zero_train": "AgentGuard-Zero-Train",
-    "agentguard_zero_train_select": "AgentGuard-Zero-Full",
+    "agentguard_zero_train_random_k": "AgentGuard-Zero-Train + Random-K",
+    "agentguard_zero_train_generic_best_of_k": "AgentGuard-Zero-Train + Generic Best-of-K",
+    "agentguard_zero_train_soft_v5c": "AgentGuard-Zero-Train + Soft V5-C",
     "agentguard_zero_full": "AgentGuard-Zero-Full",
     "oracle_defender": "Oracle Defender",
     "random_policy": "Random Policy",
@@ -101,13 +106,25 @@ MODEL_SYSTEMS = {
     "qwen_zero_shot_vda",
     "agentguard_zero_select",
     "agentguard_zero_train",
-    "agentguard_zero_train_select",
+    "agentguard_zero_train_random_k",
+    "agentguard_zero_train_generic_best_of_k",
+    "agentguard_zero_train_soft_v5c",
     "agentguard_zero_full",
+}
+
+TRAINED_K_CONTROLS = {
+    "agentguard_zero_train_random_k",
+    "agentguard_zero_train_generic_best_of_k",
+    "agentguard_zero_train_soft_v5c",
 }
 
 
 def json_dumps(value: Any, indent: int | None = None) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=False, indent=indent, default=str)
+
+
+def canonical_system_id(system: str) -> str:
+    return SYSTEM_ALIASES.get(str(system), str(system))
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -236,19 +253,29 @@ def adapt_packet_v2(action_packet: dict[str, Any], public_context: Any) -> dict[
     if observation is None:
         return action_packet
     events = [item for item in observation.get("observed_events", []) or [] if isinstance(item, dict)]
-    first_event = events[0] if events else {}
-    event_id = str(first_event.get("event_id", "event-0"))
-    evidence_id = str(first_event.get("evidence_id", ""))
+    event_by_id = {str(item.get("event_id", "")): item for item in events}
+    tool = action_packet.get("tool_call", {}) or {"name": "None", "args": {}}
+    tool_args = tool.get("args", {}) if isinstance(tool.get("args", {}), dict) else {}
+    requested_event_id = str(tool_args.get("event_id", ""))
+    primary_event = event_by_id.get(requested_event_id)
+    if primary_event is None:
+        response_target = str((action_packet.get("response", {}) or {}).get("target", ""))
+        primary_event = next(
+            (item for item in events if str(item.get("entity_id", "")) == response_target),
+            events[0] if events else {},
+        )
+    event_id = str(primary_event.get("event_id", "event-0"))
+    evidence_id = str(primary_event.get("evidence_id", ""))
     refs = [evidence_id] if evidence_id else []
     old_memory = action_packet.get("memory_update", {}) or {}
     memory_operations: list[dict[str, Any]] = []
-    claim = first_event.get("claim_semantics") or {
-        "entity_id": str(first_event.get("entity_id", "unknown")),
+    claim = primary_event.get("claim_semantics") or {
+        "entity_id": str(primary_event.get("entity_id", "unknown")),
         "predicate": "observed_claim",
-        "object": str(first_event.get("objective_hint", "unknown")),
+        "object": str(primary_event.get("objective_hint", "unknown")),
         "scope": "cyber_defense",
     }
-    source_id = str(first_event.get("source_id") or first_event.get("source") or "unknown")
+    source_id = str(primary_event.get("source_id") or primary_event.get("source") or "unknown")
     requested_statuses = (
         ("confirmed_profile", "confirmed"),
         ("profile_quarantine", "quarantined"),
@@ -272,7 +299,6 @@ def adapt_packet_v2(action_packet: dict[str, Any], public_context: Any) -> dict[
         "cross_checked": "supported",
         "rejected": "contradicted",
     }.get(old_status, "unverified")
-    tool = action_packet.get("tool_call", {}) or {"name": "None", "args": {}}
     trust_operations = []
     if refs and str(tool.get("name", "None")) in {"CrossCheck", "ProvenanceCheck", "SourceChallenge", "CanaryProbe"}:
         trust_operations.append(
@@ -288,11 +314,16 @@ def adapt_packet_v2(action_packet: dict[str, Any], public_context: Any) -> dict[
         "belief": action_packet.get("belief", {}),
         "evidence_assessment": [
             {
-                "event_id": event_id,
-                "status": status,
-                "suspected_poisoning": bool(old_memory.get("profile_quarantine") or old_memory.get("rejected_profile")),
+                "event_id": str(event.get("event_id", "")),
+                "status": status if str(event.get("event_id", "")) == event_id else "unverified",
+                "suspected_poisoning": bool(
+                    str(event.get("event_id", "")) == event_id
+                    and (old_memory.get("profile_quarantine") or old_memory.get("rejected_profile"))
+                ),
             }
-        ] if events else [],
+            for event in events[:8]
+            if str(event.get("event_id", ""))
+        ],
         "trust_operations": trust_operations,
         "memory_operations": memory_operations,
         "memory_usage": [],
@@ -377,7 +408,7 @@ def oracle_action(public_context: Any, scenario: dict[str, Any] | None, turn: in
         event_id=event_id,
         tool="None",
         action="ShadowBlock",
-        target=event_id,
+        target=target,
         confirmed=[true_objective],
         rationale=f"oracle bounded containment for {target}",
         business_risk=0.15,
@@ -459,10 +490,14 @@ def system_prompt(system: str) -> str:
             "or ShadowActionProbe before confirmed memory updates or high-impact responses."
         ),
         "agentguard_zero_train": common + " Use the trained AgentGuard-Zero VDA policy.",
-        "agentguard_zero_train_select": (
-            common
-            + " Use the trained AgentGuard-Zero VDA policy to generate diverse candidate actions. "
-            "The external public-state V5-C selector will choose among them."
+        "agentguard_zero_train_random_k": (
+            common + " Use the trained AgentGuard-Zero VDA policy to generate diverse candidate actions."
+        ),
+        "agentguard_zero_train_generic_best_of_k": (
+            common + " Use the trained AgentGuard-Zero VDA policy to generate diverse candidate actions."
+        ),
+        "agentguard_zero_train_soft_v5c": (
+            common + " Use the trained AgentGuard-Zero VDA policy to generate diverse candidate actions."
         ),
         "agentguard_zero_full": (
             common
@@ -493,17 +528,29 @@ def postprocess_candidate(system: str, text: str, public_context: Any) -> str:
             observation = v2_observation(public_context) or {}
             events = observation.get("observed_events", []) or []
             if events:
-                event = events[0]
-                evidence_id = str(event.get("evidence_id", ""))
-                assurance = str(event.get("source_assurance_level", "unknown"))
-                pkt["trust_operations"] = [
-                    {
-                        "op": "challenge" if assurance in {"low", "unknown"} else "hold",
-                        "source_id": str(event.get("source_id") or event.get("source") or "unknown"),
-                        "event_id": str(event.get("event_id", "")),
-                        "evidence_refs": [evidence_id] if evidence_id else [],
-                    }
-                ]
+                source_state = (
+                    observation.get("defender_state", {})
+                    .get("trust", {})
+                    .get("source_reputation", {})
+                ) or {}
+                operations = []
+                for event in events[:4]:
+                    evidence_id = str(event.get("evidence_id", ""))
+                    source_id = str(event.get("source_id") or event.get("source") or "unknown")
+                    public_trust = source_state.get(source_id, {}) or {}
+                    weak = (
+                        base.safe_float(public_trust.get("mean", 0.5), 0.5) < 0.55
+                        or base.safe_float(public_trust.get("uncertainty", 1.0), 1.0) > 0.30
+                    )
+                    operations.append(
+                        {
+                            "op": "challenge" if weak else "hold",
+                            "source_id": source_id,
+                            "event_id": str(event.get("event_id", "")),
+                            "evidence_refs": [evidence_id] if evidence_id else [],
+                        }
+                    )
+                pkt["trust_operations"] = operations
         return json_dumps(pkt)
     pkt, ok, _ = base.parse_action_json(text)
     if not ok:
@@ -556,17 +603,125 @@ def postprocess_candidate(system: str, text: str, public_context: Any) -> str:
 
 
 def model_policy(system: str) -> str:
+    system = canonical_system_id(system)
     if system in {"react_base_tools", "react_state_layer", "trajectory_react_state_layer"}:
         return "base_tools"
-    if system in {"agentguard_zero_select", "agentguard_zero_train_select", "agentguard_zero_full"}:
+    if system in {"agentguard_zero_select", "agentguard_zero_full"} | TRAINED_K_CONTROLS:
         return "agentguard_zero_select"
     return "zero_shot_vda"
 
 
 def default_candidate_count(system: str, requested: int) -> int:
-    if system in {"agentguard_zero_select", "agentguard_zero_train_select", "agentguard_zero_full"}:
+    system = canonical_system_id(system)
+    if system in {"agentguard_zero_select", "agentguard_zero_full"} | TRAINED_K_CONTROLS:
         return max(2, requested)
     return 1
+
+
+def effective_selector_mode(system: str, requested: str) -> str:
+    system = canonical_system_id(system)
+    if system == "agentguard_zero_train_random_k":
+        return "random_k"
+    if system == "agentguard_zero_train_generic_best_of_k":
+        return "generic_best_of_k"
+    if system == "agentguard_zero_train_soft_v5c":
+        return "v5_c_soft_score_only"
+    if system in {"agentguard_zero_select", "agentguard_zero_full"}:
+        return "v5_c_evidence_governor"
+    return requested if system == "agentguard_zero_select" else ""
+
+
+def candidate_scoring_mode(system: str, requested: str) -> str:
+    if system in {"agentguard_zero_train_random_k", "agentguard_zero_train_generic_best_of_k"}:
+        return "mitigation_v2"
+    return requested
+
+
+def select_runtime_candidate(
+    system: str,
+    public_context: dict[str, Any],
+    raw_candidates: list[str],
+    policy: str,
+    *,
+    selector_mode: str,
+    seed: int = 20260709,
+) -> base.Candidate:
+    observation = v2_observation(public_context)
+    if observation is not None and system == "agentguard_zero_train_random_k":
+        if not raw_candidates:
+            raw_candidates = ["{}"]
+        identity = {
+            "seed": int(seed),
+            "instance_id": observation.get("instance_id", ""),
+            "time": observation.get("time", 0),
+        }
+        index = random.Random(json_dumps(identity)).randrange(len(raw_candidates))
+        text = raw_candidates[index]
+        packet, ok, message = parse_action_json_v4(text)
+        return base.Candidate(
+            text,
+            packet,
+            ok,
+            message,
+            0.0,
+            {"selector": "random_k", "selected_index": index},
+        )
+    if observation is not None and system == "agentguard_zero_train_generic_best_of_k":
+        selected = base.select_candidate(
+            public_context,
+            raw_candidates,
+            "agentguard_zero_select",
+            selector_mode="mitigation_v2",
+        )
+        selected.diagnostics = dict(selected.diagnostics)
+        selected.diagnostics["selector"] = "generic_best_of_k"
+        return selected
+    if observation is not None and system == "agentguard_zero_train_soft_v5c":
+        scored = [
+            score_v5c_candidate(public_context, text, index=index)
+            for index, text in enumerate(raw_candidates)
+        ]
+        if not scored:
+            scored = [score_v5c_candidate(public_context, "{}", index=0)]
+            raw_candidates = ["{}"]
+        selected = max(
+            scored,
+            key=lambda item: (item.parse_ok, item.worst_case_utility, item.score, -item.index),
+        )
+        diagnostics = dict(selected.diagnostics)
+        diagnostics.update(
+            {
+                "selector": "v5_c_soft_score_only",
+                "selected_index": selected.index,
+                "hard_gate_enforced": False,
+                "hard_violations": list(selected.hard_violations),
+            }
+        )
+        return base.Candidate(
+            raw_candidates[selected.index],
+            selected.packet,
+            selected.parse_ok,
+            selected.parse_message,
+            selected.worst_case_utility,
+            diagnostics,
+        )
+    if observation is not None and system in {"agentguard_zero_select", "agentguard_zero_full"}:
+        selected_text, diagnostics = select_v5c_json(public_context, raw_candidates)
+        packet, ok, message = parse_action_json_v4(selected_text)
+        return base.Candidate(
+            selected_text,
+            packet,
+            ok,
+            message,
+            float(diagnostics.get("selected_score", 0.0)),
+            diagnostics,
+        )
+    return base.select_candidate(
+        public_context,
+        raw_candidates,
+        policy,
+        selector_mode=selector_mode,
+    )
 
 
 def build_backend(args: argparse.Namespace) -> Any:
@@ -668,7 +823,14 @@ def run_model_one(row: dict[str, Any], row_index: int, backend: Any, args: argpa
     for turn in range(max_turns):
         raw_candidates = backend.generate(messages, public_context, candidate_count)
         raw_candidates = [postprocess_candidate(args.system, item, public_context) for item in raw_candidates]
-        selected = base.select_candidate(public_context, raw_candidates, policy, selector_mode=args.selector_mode)
+        selected = select_runtime_candidate(
+            args.system,
+            public_context,
+            raw_candidates,
+            policy,
+            selector_mode=args.selector_mode,
+            seed=args.seed,
+        )
         selected_actions.append(
             {
                 "turn": turn,
@@ -680,7 +842,11 @@ def run_model_one(row: dict[str, Any], row_index: int, backend: Any, args: argpa
                 "diagnostics": selected.diagnostics,
                 "candidate_count": len(raw_candidates),
                     "candidate_diagnostics": [
-                    candidate_diagnostics(public_context, cand, args.selector_mode)
+                    candidate_diagnostics(
+                        public_context,
+                        cand,
+                        candidate_scoring_mode(args.system, args.selector_mode),
+                    )
                     for cand in raw_candidates
                 ],
             }
@@ -762,8 +928,13 @@ def run_model_many(
                 postprocess_candidate(args.system, item, state["public_context"])
                 for item in raw_candidates
             ]
-            selected = base.select_candidate(
-                state["public_context"], raw_candidates, policy, selector_mode=args.selector_mode
+            selected = select_runtime_candidate(
+                args.system,
+                state["public_context"],
+                raw_candidates,
+                policy,
+                selector_mode=args.selector_mode,
+                seed=args.seed,
             )
             selected_values.append(selected)
             state["selected_actions"].append(
@@ -778,7 +949,9 @@ def run_model_many(
                     "candidate_count": len(raw_candidates),
                     "candidate_diagnostics": [
                         candidate_diagnostics(
-                            state["public_context"], candidate, args.selector_mode
+                            state["public_context"],
+                            candidate,
+                            candidate_scoring_mode(args.system, args.selector_mode),
                         )
                         for candidate in raw_candidates
                     ],
@@ -865,7 +1038,14 @@ def betrayal_detected(actions: list[dict[str, Any]], score: dict[str, Any], task
         tool = str((packet.get("tool_call", {}) or {}).get("name", "None")) if isinstance(packet, dict) else "None"
         memory = packet.get("memory_update", {}) if isinstance(packet, dict) else {}
         operations = packet.get("memory_operations", []) if isinstance(packet, dict) else []
+        trust_ops = packet.get("trust_operations", []) if isinstance(packet, dict) else []
         if tool in {"CrossCheck", "ProvenanceCheck", "GraphQuery"}:
+            return 1.0
+        if tool in {"SourceChallenge", "CanaryProbe", "DecoyProbe", "ShadowActionProbe"} and any(
+            operation.get("op") in {"challenge", "contradict"}
+            for operation in trust_ops
+            if isinstance(operation, dict)
+        ):
             return 1.0
         if isinstance(memory, dict) and (memory.get("profile_quarantine") or memory.get("rejected_profile")):
             return 1.0
@@ -977,17 +1157,17 @@ def summarize(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[s
         "model_path": args.model_path if args.system in MODEL_SYSTEMS else "",
         "adapter_path": (
             args.adapter_path
-            if args.system in {"trajectory_react_state_layer", "agentguard_zero_train", "agentguard_zero_train_select", "agentguard_zero_full"}
+            if args.system in {
+                "trajectory_react_state_layer",
+                "agentguard_zero_train",
+                "agentguard_zero_full",
+            } | TRAINED_K_CONTROLS
             else ""
         ),
         "api_model": args.api_model if args.model_backend == "api" else "",
         "num_scenarios": n,
         "candidate_count": default_candidate_count(args.system, args.candidate_count) if args.system in MODEL_SYSTEMS else 1,
-        "selector_mode": (
-            args.selector_mode
-            if args.system in {"agentguard_zero_select", "agentguard_zero_train_select", "agentguard_zero_full"}
-            else ""
-        ),
+        "selector_mode": effective_selector_mode(args.system, args.selector_mode),
         "offset": args.offset,
         "safe_utility": mean([item["tmcd_metrics"]["safe_utility"] for item in results]),
         "trajectory_reward": mean([base.safe_float(item["score"].get("reward", 0.0), 0.0) for item in results]),
@@ -1062,7 +1242,11 @@ def resolve_model_path(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", required=True)
-    parser.add_argument("--system", choices=SYSTEMS + sorted(INTERNAL_SYSTEMS), required=True)
+    parser.add_argument(
+        "--system",
+        choices=SYSTEMS + sorted(INTERNAL_SYSTEMS) + sorted(SYSTEM_ALIASES),
+        required=True,
+    )
     parser.add_argument("--model_path", default=os.environ.get("AGZ_MODEL_PATH", ""))
     parser.add_argument("--adapter_path", default=os.environ.get("AGZ_ADAPTER_PATH", ""))
     parser.add_argument("--model_backend", choices=["hf", "mock", "api"], default=os.environ.get("AGZ_MODEL_BACKEND", "hf"))
@@ -1072,7 +1256,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default=os.environ.get("AGZ_EVAL_SPLIT", "all"))
     parser.add_argument("--task_filter", default=os.environ.get("AGZ_TASK_FILTER", ""))
     parser.add_argument("--seed", type=int, default=int(os.environ.get("AGZ_EVAL_SEED", "20260708")))
-    parser.add_argument("--selector_mode", default=os.environ.get("AGZ_SELECTOR_MODE", "v5_c_frontier_minimax"))
+    parser.add_argument(
+        "--selector_mode",
+        default=os.environ.get("AGZ_SELECTOR_MODE", "v5_c_evidence_governor"),
+    )
     parser.add_argument("--run_name", default="")
     parser.add_argument("--output_dir", default=str(ROOT / "outputs" / "tmcd_eval"))
     parser.add_argument("--max_turns", type=int, default=int(os.environ.get("AGZ_AGENT_MAX_TURNS", "5")))
@@ -1101,6 +1288,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api_multi_choice", action="store_true", default=base.env_flag("AGZ_API_MULTI_CHOICE", False))
     parser.add_argument("--api_system_prompt", default=os.environ.get("AGZ_API_SYSTEM_PROMPT", "Return compact strict JSON only."))
     args = parser.parse_args()
+    args.system = canonical_system_id(args.system)
     if args.num_shards <= 0 or not 0 <= args.shard_index < args.num_shards:
         parser.error("shard_index must satisfy 0 <= shard_index < num_shards")
     if args.trajectory_batch_size <= 0:

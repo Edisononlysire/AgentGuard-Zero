@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from agentguard_zero.protocol import TMCD_RELEASE_REVISION
+
 
 SCHEMA_VERSION = 2
 PROTOCOL_VERSION = "tmcd-v2"
@@ -46,6 +48,29 @@ def sha256_tree(path: str | os.PathLike[str]) -> str:
         return sha256_file(root)
     digest = hashlib.sha256()
     for child in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(str(child.relative_to(root)).encode("utf-8"))
+        digest.update(sha256_file(child).encode("ascii"))
+    return digest.hexdigest()
+
+
+def sha256_source_tree(path: str | os.PathLike[str]) -> str:
+    """Hash source artifacts while ignoring interpreter and editor by-products."""
+
+    root = Path(path)
+    if root.is_file():
+        return sha256_file(root)
+    digest = hashlib.sha256()
+    children = []
+    for child in root.rglob("*"):
+        if not child.is_file():
+            continue
+        relative = child.relative_to(root)
+        if any(part in {"__pycache__", ".git", ".pytest_cache"} for part in relative.parts):
+            continue
+        if child.suffix in {".pyc", ".pyo", ".swp", ".tmp"} or child.name == ".DS_Store":
+            continue
+        children.append(child)
+    for child in sorted(children):
         digest.update(str(child.relative_to(root)).encode("utf-8"))
         digest.update(sha256_file(child).encode("ascii"))
     return digest.hexdigest()
@@ -148,6 +173,60 @@ def write_base_manifest(
         "status": "base",
     }
     atomic_write_json(target, manifest)
+    return manifest
+
+
+def write_frozen_manifest(
+    path: str | os.PathLike[str],
+    *,
+    role: str,
+    backbone: str,
+    round_index: int,
+    model_path: str,
+    seed: int,
+    parent_manifest_path: str,
+    training_data_manifest_path: str,
+    training_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Advance lineage without changing parameters for a training ablation."""
+
+    if round_index <= 0:
+        raise ValueError("frozen checkpoints must have round_index > 0")
+    parent = load_checkpoint_manifest(
+        parent_manifest_path,
+        role=role,
+        backbone=backbone,
+        round_index=round_index - 1,
+    )
+    data_manifest = Path(training_data_manifest_path).resolve()
+    if not data_manifest.is_file():
+        raise LineageError(f"training data manifest is missing: {data_manifest}")
+    frozen_training_config = dict(training_config or {})
+    frozen_training_config["parameter_update"] = False
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "protocol_version": PROTOCOL_VERSION,
+        "kind": "checkpoint",
+        "role": role,
+        "backbone": backbone,
+        "round": int(round_index),
+        "created_at": utc_now(),
+        "seed": int(seed),
+        "base_model": model_identity(model_path),
+        "parent_manifest": str(Path(parent_manifest_path).resolve()),
+        "parent_manifest_sha256": sha256_file(parent_manifest_path),
+        "training_data_manifest": str(data_manifest),
+        "training_data_manifest_sha256": sha256_file(data_manifest),
+        "training_config": frozen_training_config,
+        "training_config_sha256": sha256_bytes(
+            canonical_json(frozen_training_config).encode("utf-8")
+        ),
+        "checkpoint_path": parent.get("checkpoint_path"),
+        "adapter_path": parent.get("adapter_path"),
+        "adapter_sha256": parent.get("adapter_sha256"),
+        "status": "frozen",
+    }
+    atomic_write_json(path, manifest)
     return manifest
 
 
@@ -318,6 +397,7 @@ def parquet_lineage(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
         values.append(
             {
                 "scenario_id": str(row.get("scenario_id") or extra.get("scenario_id") or scenario.get("scenario_id")),
+                "task_id": str(row.get("task_id") or extra.get("task_id") or ""),
                 "scenario_fingerprint": str(
                     extra.get("scenario_fingerprint") or scenario_fingerprint(scenario)
                 ),
@@ -345,9 +425,17 @@ def validate_round_lineage(
         backbone=backbone,
         round_index=target_round,
     )
+    if str(
+        (dca_manifest.get("training_config", {}) or {}).get(
+            "tmcd_release_revision", ""
+        )
+    ) != TMCD_RELEASE_REVISION:
+        raise LineageError("DCA checkpoint release revision mismatch")
     pool_manifest = read_json(pool_manifest_path)
     if pool_manifest.get("kind") != "vda_pool":
         raise LineageError("pool manifest kind must be vda_pool")
+    if str(pool_manifest.get("tmcd_release_revision", "")) != TMCD_RELEASE_REVISION:
+        raise LineageError("VDA pool release revision mismatch")
     expected_manifest_sha = sha256_file(dca_manifest_path)
     if pool_manifest.get("source_dca_checkpoint_manifest_sha256") != expected_manifest_sha:
         raise LineageError("VDA pool was not generated from the declared DCA checkpoint")
@@ -355,10 +443,49 @@ def validate_round_lineage(
         raise LineageError("VDA candidates predate DCA checkpoint creation")
 
     feedback = feedback_fingerprints(feedback_log_path)
+    declared_paths = {
+        str(Path(path).resolve()): split
+        for split, path in (pool_manifest.get("paths", {}) or {}).items()
+        if split in {"train", "dev", "xplay"}
+    }
     split_lineage: list[dict[str, Any]] = []
+    actual_split_counts: dict[str, int] = {}
+    actual_split_task_counts: dict[str, dict[str, int]] = {}
     for path in split_paths:
-        split_lineage.extend(parquet_lineage(path))
+        resolved = str(Path(path).resolve())
+        split = declared_paths.get(resolved)
+        if split is None:
+            raise LineageError(f"undeclared VDA split path: {resolved}")
+        rows = parquet_lineage(path)
+        split_lineage.extend(rows)
+        actual_split_counts[split] = len(rows)
+        task_counts: dict[str, int] = {}
+        for row in rows:
+            task_id = row["task_id"]
+            task_counts[task_id] = task_counts.get(task_id, 0) + 1
+        actual_split_task_counts[split] = task_counts
+    declared_split_counts = {
+        str(split): int(count)
+        for split, count in (pool_manifest.get("split_counts", {}) or {}).items()
+    }
+    if actual_split_counts != declared_split_counts:
+        raise LineageError(
+            f"VDA split counts differ from manifest: {actual_split_counts} != {declared_split_counts}"
+        )
+    declared_task_counts = {
+        str(split): {str(task): int(count) for task, count in counts.items()}
+        for split, counts in (pool_manifest.get("split_task_counts", {}) or {}).items()
+    }
+    if actual_split_task_counts != declared_task_counts:
+        raise LineageError(
+            "VDA split task counts differ from manifest: "
+            f"{actual_split_task_counts} != {declared_task_counts}"
+        )
+    if len(split_lineage) != int(pool_manifest.get("selected_count", -1)):
+        raise LineageError("VDA selected_count differs from split row count")
     split_fingerprints = {row["scenario_fingerprint"] for row in split_lineage}
+    if len(split_fingerprints) != len(split_lineage):
+        raise LineageError("VDA train/dev/xplay contain duplicate scenario fingerprints")
     overlap = sorted(feedback & split_fingerprints)
     if overlap:
         raise LineageError(f"DCA feedback leaked into VDA data: {overlap[:5]}")

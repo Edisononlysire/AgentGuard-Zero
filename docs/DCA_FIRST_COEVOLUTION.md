@@ -15,7 +15,7 @@ DCA_r generates on-policy scenarios
   -> VDA_r produces trajectory feedback
   -> update and save DCA_{r+1}
   -> DCA_{r+1} generates a fresh scenario pool
-  -> hard checks and CFC/frontier filtering
+  -> hard checks and security-CFC curriculum filtering
   -> VDA_r rolls out on the fresh train split
   -> update and save VDA_{r+1}
 ```
@@ -35,8 +35,9 @@ Its stages are resumable and recorded in `round_state.json`:
 2. Generate DCA scenarios and evaluate them against the current VDA.
 3. Optimize the DCA LoRA adapter with online hard-but-solvable rewards.
 4. Reload the new DCA adapter and generate a fresh four-shard candidate pool.
-5. Apply format, validity, safety, solvability, uniqueness, and CFC checks.
-6. Save disjoint VDA train/dev/xplay splits and their hashes.
+5. Apply format, validity, safety, solvability, uniqueness, and security-CFC checks.
+6. Select a task-balanced top curriculum, then distribute difficulty strata
+   across disjoint VDA train/dev/xplay splits and save their hashes.
 7. Optimize the VDA LoRA adapter with trajectory-level safety rewards.
 8. Independently reload both adapters and verify their hashes differ.
 
@@ -52,6 +53,13 @@ The formal defaults per backbone and round are:
 
 The four task families are active probing (T1), trust betrayal (T2), profile
 memory poisoning (T3), and business-constrained overresponse (T4).
+
+The current VDA influences the next curriculum through the 4,000-scenario
+feedback batch used to optimize DCA. The later 10,000-candidate pool filter is
+a deterministic security-aware hard-but-solvable selector over generated
+scenario metadata and simulator checks. It is not a direct multi-rollout
+estimate of current-VDA failure probability, and the paper should use the same
+terminology.
 
 ## Three Rounds
 
@@ -81,6 +89,8 @@ data/co_evolution/<backbone>/round_<r>/vda_xplay/
 
 Every checkpoint manifest records the role, backbone, round, parent manifest,
 training-data manifest, configuration hash, adapter path, and adapter hash.
+Formal artifacts also record one TMCD release revision. A completed stage from
+an older revision cannot be resumed into a newer protocol run.
 `scripts/audit_dca_first_lineage.py` reconstructs both role chains and checks
 the data dependencies. `--expected-host` is optional and can be used when an
 experiment protocol binds a run to a specific worker.

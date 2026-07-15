@@ -21,6 +21,51 @@ MITIGATION_STRENGTH = {
     "Remove": 0.80,
 }
 
+PHASE_COMPATIBILITY = {
+    "DeployDecoy": {
+        "initial_access": 0.8,
+        "discovery": 1.0,
+        "lateral_movement": 1.0,
+        "collection": 0.7,
+        "exfiltration": 0.3,
+    },
+    "LimitSession": {
+        "initial_access": 0.7,
+        "discovery": 0.8,
+        "lateral_movement": 1.0,
+        "collection": 0.9,
+        "exfiltration": 0.7,
+    },
+    "ShadowBlock": {
+        "initial_access": 0.8,
+        "discovery": 0.9,
+        "lateral_movement": 1.0,
+        "collection": 1.0,
+        "exfiltration": 0.8,
+    },
+    "Isolate": {
+        "initial_access": 0.8,
+        "discovery": 1.0,
+        "lateral_movement": 1.0,
+        "collection": 1.0,
+        "exfiltration": 1.0,
+    },
+    "Restore": {
+        "initial_access": 0.2,
+        "discovery": 0.3,
+        "lateral_movement": 0.5,
+        "collection": 0.6,
+        "exfiltration": 0.4,
+    },
+    "Remove": {
+        "initial_access": 0.5,
+        "discovery": 0.7,
+        "lateral_movement": 0.9,
+        "collection": 0.9,
+        "exfiltration": 0.7,
+    },
+}
+
 
 class HiddenWorld:
     """Oracle-only attack state. No instance is exposed through observations."""
@@ -59,9 +104,23 @@ class HiddenWorld:
             "succeeded": self.succeeded,
         }
 
-    def apply_response(self, *, action: str, belief_matches: bool, time: int) -> None:
+    def apply_response(
+        self,
+        *,
+        action: str,
+        belief_matches: bool,
+        target_matches: bool,
+        time: int,
+    ) -> None:
         strength = float(MITIGATION_STRENGTH.get(str(action), 0.0))
-        effective = strength if belief_matches else 0.0
+        phase_compatibility = float(
+            PHASE_COMPATIBILITY.get(str(action), {}).get(self.current_phase, 1.0)
+        )
+        effective = (
+            strength * phase_compatibility
+            if belief_matches and target_matches
+            else 0.0
+        )
         self.attack_pressure = max(0.0, self.attack_pressure - effective)
         self.mitigated = self.attack_pressure <= 1e-6
         self.response_history.append(
@@ -69,6 +128,9 @@ class HiddenWorld:
                 "time": int(time),
                 "action": str(action),
                 "belief_matches": bool(belief_matches),
+                "target_matches": bool(target_matches),
+                "phase": self.current_phase,
+                "phase_compatibility": phase_compatibility,
                 "mitigation_strength": strength,
                 "effective_strength": effective,
             }

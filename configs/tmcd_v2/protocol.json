@@ -1,5 +1,6 @@
 {
   "protocol_version": "tmcd-v2",
+  "release_revision": "tmcd-v2.2-20260715",
   "schema_version": 4,
   "frozen_at": "2026-07-13T00:00:00Z",
   "update_order": "dca_first_alternating",
@@ -10,15 +11,33 @@
   "vda_train_per_round": 2400,
   "vda_dev_per_round": 400,
   "vda_xplay_per_round": 800,
+  "vda_task_quota_per_round": {
+    "train": {"T1": 600, "T2": 600, "T3": 600, "T4": 600},
+    "dev": {"T1": 100, "T2": 100, "T3": 100, "T4": 100},
+    "xplay": {"T1": 200, "T2": 200, "T3": 200, "T4": 200}
+  },
+  "candidate_normalization_version": 2,
+  "curriculum_filter": "failure-conditioned DCA plus security-CFC hard-but-solvable filtering",
+  "direct_current_vda_multirollout_filter": false,
   "vda_max_update_steps": 75,
   "fixed_seed": 20260709,
   "v5c_in_dca_feedback": false,
   "v5c_in_vda_training": false,
   "v5c_in_cross_play": false,
   "tool_evidence_delay_steps": 1,
+  "response_authorization_before_effect": true,
+  "verification_budget_enforced": true,
+  "active_probe_observation_model": "deterministic-seeded noisy qualitative signals",
+  "decoy_probe_next_observation_causality": true,
+  "runtime_governor": "evidence-constrained hard gate plus soft robust ranking",
+  "evaluation_controls": {
+    "AgentGuard-Zero-Train+Random-K": "same trained VDA and K candidates; seeded random candidate",
+    "AgentGuard-Zero-Train+Generic-Best-of-K": "same trained VDA and K candidates; generic candidate score",
+    "AgentGuard-Zero-Train+Soft-V5-C": "same trained VDA and K candidates; V5-C soft score without hard admission"
+  },
   "formal_systems": {
     "AgentGuard-Zero-Train": "VDA_3 + Defender State Layer",
-    "AgentGuard-Zero-Select": "Frozen Qwen + Defender State Layer + V5-C",
-    "AgentGuard-Zero-Full": "VDA_3 + Defender State Layer + V5-C"
+    "AgentGuard-Zero-Select": "Frozen Qwen + Defender State Layer + V5-C Evidence-Constrained Runtime Governor",
+    "AgentGuard-Zero-Full": "VDA_3 + Defender State Layer + V5-C Evidence-Constrained Runtime Governor"
   }
 }

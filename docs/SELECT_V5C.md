@@ -1,4 +1,4 @@
-# AgentGuard-Zero-Select V5-C
+# AgentGuard-Zero V5-C Evidence-Constrained Runtime Governor
 
 AgentGuard-Zero-Select is the frozen-parameter deployment variant. It uses the
 same structured VDA action schema, active probing actions, profile-memory
@@ -12,38 +12,51 @@ C_t = {a_t^1, ..., a_t^K} ~ pi_theta(. | h_t)
 a_t* = argmax S_public(o_t, a),  a in C_t
 ```
 
-The V5-C frontier-minimax selector can inspect only public observations,
-generated action JSON, legal tool/action definitions, public history, and
-running cost annotations. It cannot inspect the true objective, hidden attack
-path, oracle labels, or whether an event was generated as fake evidence.
+The V5-C runtime governor can inspect only public observations, generated action
+JSON, legal tool/action definitions, public history, and running cost
+annotations. It cannot inspect the true objective, hidden attack path, oracle
+labels, or whether an event was generated as fake evidence. V5-C is not a
+training-time policy and does not update model parameters.
 
-## Public Safety Score
+## Two-Stage Public Governance
+
+V5-C first applies a non-negotiable admission gate. A candidate is inadmissible
+when it violates the action schema, cites unavailable evidence, exceeds the
+remaining verification budget, invents a target, confirms memory without
+independent support and provenance, or proposes a high-impact action without
+the required public trust support. Inadmissible candidates cannot be rescued by
+a high soft score.
+
+Only admitted candidates enter public-state robust ranking:
 
 ```text
 S_public(o, a) =
-    S_schema(a)
-  + S_verification(o, a)
+    S_verification(o, a)
   + S_poison_guard(o, a)
   + S_business_safety(o, a)
-  + S_frontier_minimax(o, a)
+  + S_robustness(o, a)
 ```
 
-- `S_schema` checks strict JSON, required fields, tools, and response actions.
 - `S_verification` values cross-checks and low-risk active probes under public
   uncertainty, while penalizing repeated verification-only delay.
 - `S_poison_guard` favors quarantine or rejection of suspicious profile claims
   and penalizes unverified confirmation.
 - `S_business_safety` favors reversible controls and penalizes unsupported
   high-impact responses.
-- `S_frontier_minimax` selects actions robust to public trust-conflict,
+- `S_robustness` favors actions robust to public trust-conflict,
   spoofability, poisoning, and overresponse indicators.
 
-If suspicious evidence appears at the first turn and sampled candidates contain
-no active probe, V5-C may add a `SourceChallenge` candidate. The augmentation
-uses only public state, quarantines the associated claim, and has low declared
-business and overresponse risk. Later public governors can prefer reversible
-actions such as `LimitSession`, `ShadowBlock`, or `DeployDecoy` when additional
-verification would mostly add delay.
+Candidate-declared uncertainty, business cost, and overresponse risk remain
+model outputs; V5-C does not treat them as ground-truth safety facts. Its gate
+and ranking derive authorization, target validity, evidence state, trust state,
+memory provenance, budget, and asset criticality from the public environment.
+If no candidate is admissible, the governor returns a conservative `Observe`
+fallback rather than executing the least-invalid proposal.
+
+If suspicious evidence appears and sampled candidates contain no active probe,
+V5-C may add a `SourceChallenge` candidate using only public state. Later, the
+governor can prefer reversible actions such as `LimitSession`, `ShadowBlock`,
+or `DeployDecoy` when additional verification would mostly add delay.
 
 ## Relationship To Train
 
@@ -56,4 +69,6 @@ Train + V5-C:        trained VDA candidates plus the same public selector.
 ```
 
 Select is calibrated only on training data and finalized on dev data. Test and
-held-out data are never used to tune selector weights or prompts.
+held-out data are never used to tune governor weights or prompts. We describe
+the implementation as evidence-constrained hard gating followed by soft robust
+ranking; we do not claim a formal minimax optimization guarantee.

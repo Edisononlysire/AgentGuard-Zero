@@ -35,9 +35,13 @@ from agentguard_zero.training.coevolution import (
     utc_now,
     validate_round_lineage,
     write_base_manifest,
+    write_frozen_manifest,
     write_trained_manifest,
 )
 from agentguard_zero.training.dca_dataset import DCA_PROMPT_VERSION, write_dca_prompt_dataset
+from agentguard_zero.protocol import TMCD_RELEASE_REVISION
+from agentguard_zero.variants import TRAINING_VARIANTS, experiment_variant
+from scripts.generate_dca_scenarios import DCA_CANDIDATE_NORMALIZATION_VERSION
 
 
 BACKBONE_ENV = {
@@ -270,7 +274,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone", choices=sorted(BACKBONE_ENV), required=True)
     parser.add_argument(
         "--experiment-variant",
-        choices=["full", "append_only_memory"],
+        choices=TRAINING_VARIANTS,
         default="full",
     )
     parser.add_argument(
@@ -298,11 +302,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vda-steps", type=int, default=75)
     parser.add_argument("--candidate-batch-size", type=int, default=4)
     parser.add_argument("--feedback-port", type=int, default=0)
+    parser.add_argument(
+        "--stop-after-stage",
+        choices=["build_isolated_vda_pool"],
+        default=None,
+        help="Stop after producing and validating the isolated VDA pool.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    variant = experiment_variant(args.experiment_variant)
     if args.source_round < 0:
         raise SystemExit("--source-round must be non-negative")
     gpu_ids = [value.strip() for value in args.allocated_gpus.split(",") if value.strip()]
@@ -371,6 +382,7 @@ def main() -> None:
     stage = "prepare_dca_feedback_prompts"
     try:
         expected_prompt_signature = {
+            "tmcd_release_revision": TMCD_RELEASE_REVISION,
             "prompt_version": DCA_PROMPT_VERSION,
             "num_rows": prompt_rows,
             "seed": args.seed,
@@ -386,6 +398,11 @@ def main() -> None:
                 else {}
             )
             if any(existing.get(key) != value for key, value in expected_prompt_signature.items()):
+                if stage_complete(state_path, "update_dca"):
+                    raise LineageError(
+                        "completed DCA stage predates the active TMCD release revision; "
+                        "start a clean artifact scope"
+                    )
                 mark_stage(
                     state_path,
                     stage,
@@ -407,6 +424,7 @@ def main() -> None:
                 "schema_version": 1,
                 "kind": "dca_prompt_pool",
                 "created_at": utc_now(),
+                "tmcd_release_revision": TMCD_RELEASE_REVISION,
                 **dataset,
                 "sha256": sha256_file(prompt_path),
                 "dca_feedback_candidates_requested": args.dca_feedback_candidates,
@@ -427,6 +445,68 @@ def main() -> None:
     dca_target_manifest_path = _checkpoint_manifest_path(layout, "dca", target_round)
     try:
         if not stage_complete(state_path, stage):
+            mark_stage(state_path, stage, "in_progress")
+            if not variant.train_dca:
+                feedback_log_path.parent.mkdir(parents=True, exist_ok=True)
+                feedback_log_path.write_text("", encoding="utf-8")
+                feedback_manifest = {
+                    "schema_version": 1,
+                    "kind": "dca_feedback",
+                    "tmcd_release_revision": TMCD_RELEASE_REVISION,
+                    "created_at": utc_now(),
+                    "backbone": args.backbone,
+                    "source_round": args.source_round,
+                    "target_dca_round": target_round,
+                    "seed": args.seed,
+                    "prompt_manifest": str(prompt_manifest_path),
+                    "prompt_manifest_sha256": sha256_file(prompt_manifest_path),
+                    "prompt_parquet": str(prompt_path),
+                    "prompt_parquet_sha256": sha256_file(prompt_path),
+                    "feedback_log": str(feedback_log_path),
+                    "feedback_log_sha256": sha256_file(feedback_log_path),
+                    "feedback_rows": 0,
+                    "valid_vda_evaluated_rows": 0,
+                    "feedback_unique_fingerprints": 0,
+                    "source_dca_manifest": str(dca_parent_path),
+                    "source_dca_manifest_sha256": sha256_file(dca_parent_path),
+                    "source_vda_manifest": str(vda_parent_path),
+                    "source_vda_manifest_sha256": sha256_file(vda_parent_path),
+                    "parameter_update": False,
+                    "ablation": "no_dca_training",
+                }
+                atomic_write_json(feedback_manifest_path, feedback_manifest)
+                write_frozen_manifest(
+                    dca_target_manifest_path,
+                    role="dca",
+                    backbone=args.backbone,
+                    round_index=target_round,
+                    model_path=model_path,
+                    seed=args.seed,
+                    parent_manifest_path=str(dca_parent_path),
+                    training_data_manifest_path=str(feedback_manifest_path),
+                    training_config={
+                        "protocol": "dca_first_alternating",
+                        "tmcd_protocol_version": "tmcd-v2",
+                        "tmcd_release_revision": TMCD_RELEASE_REVISION,
+                        "experiment_variant": args.experiment_variant,
+                        "artifact_scope": args.artifact_scope,
+                        "execution_host": execution_host,
+                        "allocated_gpus": gpu_ids,
+                        "world_size": len(gpu_ids),
+                        "parameter_update": False,
+                        "seed": args.seed,
+                    },
+                )
+                mark_stage(
+                    state_path,
+                    stage,
+                    "completed",
+                    checkpoint_manifest=str(dca_target_manifest_path),
+                    feedback_manifest=str(feedback_manifest_path),
+                    parameter_update=False,
+                )
+
+        if variant.train_dca and not stage_complete(state_path, stage):
             mark_stage(state_path, stage, "in_progress")
             dca_round_steps = args.dca_steps or math.ceil(prompt_rows / args.dca_batch_size)
             dca_checkpoint_root = dca_target_dir / "trainer"
@@ -479,7 +559,10 @@ def main() -> None:
                         "AGZ_BACKBONE": args.backbone,
                         "AGZ_EXPERIMENT_VARIANT": args.experiment_variant,
                         "AGZ_BATCH_SIZE": str(args.dca_batch_size),
-                        "AGZ_PPO_MINI_BATCH_SIZE": str(args.dca_batch_size),
+                        "AGZ_PPO_MINI_BATCH_SIZE": os.environ.get(
+                            "AGZ_DCA_PPO_MINI_BATCH_SIZE",
+                            str(args.dca_batch_size),
+                        ),
                         "AGZ_PPO_MICRO_BATCH_SIZE_PER_GPU": os.environ.get(
                             "AGZ_DCA_PPO_MICRO_BATCH_SIZE_PER_GPU", "4"
                         ),
@@ -523,6 +606,7 @@ def main() -> None:
             feedback_manifest = {
                 "schema_version": 1,
                 "kind": "dca_feedback",
+                "tmcd_release_revision": TMCD_RELEASE_REVISION,
                 "created_at": utc_now(),
                 "backbone": args.backbone,
                 "source_round": args.source_round,
@@ -556,6 +640,7 @@ def main() -> None:
                 training_config={
                     "protocol": "dca_first_alternating",
                     "tmcd_protocol_version": "tmcd-v2",
+                    "tmcd_release_revision": TMCD_RELEASE_REVISION,
                     "experiment_variant": args.experiment_variant,
                     "artifact_scope": args.artifact_scope,
                     "execution_host": execution_host,
@@ -565,6 +650,12 @@ def main() -> None:
                     "feedback_services": len(gpu_ids),
                     "rollout_n": args.dca_rollout_n,
                     "batch_size": args.dca_batch_size,
+                    "ppo_mini_batch_size": int(
+                        os.environ.get(
+                            "AGZ_DCA_PPO_MINI_BATCH_SIZE",
+                            str(args.dca_batch_size),
+                        )
+                    ),
                     "round_steps": dca_round_steps,
                     "ppo_micro_batch_size_per_gpu": int(
                         os.environ.get("AGZ_DCA_PPO_MICRO_BATCH_SIZE_PER_GPU", "4")
@@ -580,6 +671,12 @@ def main() -> None:
                     "vda_feedback_max_input_tokens": int(
                         os.environ.get("AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS", 2048)
                     ),
+                    "vda_feedback_continuation_prompt_mode": os.environ.get(
+                        "AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE", "legacy"
+                    ),
+                    "vda_feedback_invalid_action_patience": int(
+                        os.environ.get("AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE", 0)
+                    ),
                     "lora_rank": 16,
                     "lora_alpha": 32,
                     "learning_rate": 2e-5,
@@ -594,18 +691,79 @@ def main() -> None:
                 checkpoint_manifest=str(dca_target_manifest_path),
                 feedback_manifest=str(feedback_manifest_path),
             )
+        if not stage_complete(state_path, stage):
+            raise LineageError(f"DCA update stage did not complete: {state_path}")
         dca_target = load_checkpoint_manifest(
             dca_target_manifest_path,
             role="dca",
             backbone=args.backbone,
             round_index=target_round,
         )
+        if str(
+            (dca_target.get("training_config", {}) or {}).get(
+                "tmcd_release_revision", ""
+            )
+        ) != TMCD_RELEASE_REVISION:
+            raise LineageError("DCA checkpoint release revision mismatch")
     except Exception as exc:
         _mark_failed(state_path, stage, exc)
         raise
 
     stage = "generate_fresh_vda_candidates"
+    candidate_max_attempts = int(
+        os.environ.get("AGZ_DCA_CANDIDATE_MAX_ATTEMPTS", "3")
+    )
     try:
+        if candidate_max_attempts <= 0:
+            raise LineageError("candidate generation retry budget must be positive")
+        if stage_complete(state_path, stage):
+            existing_pool = (
+                json.loads(candidate_path.read_text(encoding="utf-8"))
+                if candidate_path.exists()
+                else {}
+            )
+            expected_signature = {
+                "tmcd_release_revision": TMCD_RELEASE_REVISION,
+                "num_candidates_requested": args.vda_candidates,
+                "experiment_variant": args.experiment_variant,
+                "generation_prompt_version": DCA_PROMPT_VERSION,
+                "candidate_normalization_version": DCA_CANDIDATE_NORMALIZATION_VERSION,
+                "max_attempts": candidate_max_attempts,
+                "source_dca_round": target_round,
+                "source_dca_checkpoint_manifest_sha256": sha256_file(
+                    dca_target_manifest_path
+                ),
+            }
+            if any(
+                existing_pool.get(key) != value
+                for key, value in expected_signature.items()
+            ):
+                if stage_complete(state_path, "update_vda"):
+                    raise LineageError(
+                        "candidate generation signature changed after VDA training completed; "
+                        "use a new artifact scope instead of mutating a completed round"
+                    )
+                existing_vda_steps = list(
+                    (vda_target_dir / "trainer").glob("global_step_*")
+                )
+                if existing_vda_steps:
+                    raise LineageError(
+                        "candidate generation signature changed after VDA recovery checkpoints "
+                        f"were created: {existing_vda_steps}"
+                    )
+                mark_stage(
+                    state_path,
+                    stage,
+                    "stale",
+                    reason="candidate generation signature changed",
+                    expected=expected_signature,
+                )
+                mark_stage(
+                    state_path,
+                    "build_isolated_vda_pool",
+                    "stale",
+                    reason="upstream candidate generation signature changed",
+                )
         if not stage_complete(state_path, stage):
             mark_stage(state_path, stage, "in_progress")
             jobs = []
@@ -642,6 +800,16 @@ def main() -> None:
                             os.environ.get("AGZ_DCA_MAX_PROMPT_LENGTH", "2048"),
                             "--max-new-tokens",
                             os.environ.get("AGZ_DCA_MAX_RESPONSE_LENGTH", "1024"),
+                            "--attn-implementation",
+                            os.environ.get(
+                                "AGZ_DCA_CANDIDATE_ATTN_IMPLEMENTATION", "sdpa"
+                            ),
+                            "--partial-fsync-every-batches",
+                            os.environ.get(
+                                "AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES", "1"
+                            ),
+                            "--max-attempts",
+                            str(candidate_max_attempts),
                             "--temperature",
                             os.environ.get("AGZ_ROLLOUT_TEMPERATURE", "0.7"),
                             "--top-p",
@@ -684,6 +852,28 @@ def main() -> None:
 
     stage = "build_isolated_vda_pool"
     try:
+        if stage_complete(state_path, stage):
+            try:
+                validate_round_lineage(
+                    dca_manifest_path=str(dca_target_manifest_path),
+                    feedback_log_path=str(feedback_log_path),
+                    pool_manifest_path=str(pool_manifest_path),
+                    split_paths=[str(path) for path in split_paths.values()],
+                    backbone=args.backbone,
+                    target_round=target_round,
+                )
+            except (LineageError, FileNotFoundError, json.JSONDecodeError) as exc:
+                if stage_complete(state_path, "update_vda"):
+                    raise LineageError(
+                        "isolated VDA pool lineage changed after VDA training completed"
+                    ) from exc
+                mark_stage(
+                    state_path,
+                    stage,
+                    "stale",
+                    reason="stored VDA pool lineage no longer validates",
+                    error=str(exc),
+                )
         if not stage_complete(state_path, stage):
             mark_stage(state_path, stage, "in_progress")
             _run(
@@ -723,6 +913,47 @@ def main() -> None:
         _mark_failed(state_path, stage, exc)
         raise
 
+    _run(
+        [
+            sys.executable,
+            str(root / "scripts" / "audit_tmcd_v2_release.py"),
+            "--pool-manifest",
+            str(pool_manifest_path),
+            "--train-size",
+            str(args.vda_train_size),
+            "--dev-size",
+            str(args.vda_dev_size),
+            "--xplay-size",
+            str(args.vda_xplay_size),
+        ]
+    )
+
+    if args.stop_after_stage == stage:
+        lineage = validate_round_lineage(
+            dca_manifest_path=str(dca_target_manifest_path),
+            feedback_log_path=str(feedback_log_path),
+            pool_manifest_path=str(pool_manifest_path),
+            split_paths=[str(path) for path in split_paths.values()],
+            backbone=args.backbone,
+            target_round=target_round,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "stopped_after_requested_stage",
+                    "stage": stage,
+                    "backbone": args.backbone,
+                    "source_round": args.source_round,
+                    "target_round": target_round,
+                    "lineage": lineage,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
+        )
+        return
+
     stage = "update_vda"
     vda_target_manifest_path = _checkpoint_manifest_path(layout, "vda", target_round)
     try:
@@ -738,12 +969,25 @@ def main() -> None:
                 data_dir=layout.data_dir,
                 round_steps=vda_round_steps,
             )
-            if not training_done:
-                vda_action_tokens = 384
-                vda_observation_tokens = 512
-                vda_trajectory_tokens = args.vda_max_turns * (
-                    vda_action_tokens + vda_observation_tokens
+            vda_action_tokens = int(os.environ.get("AGZ_VDA_ACTION_TOKENS", "384"))
+            vda_observation_tokens = int(
+                os.environ.get("AGZ_VDA_OBSERVATION_TOKENS", "512")
+            )
+            computed_trajectory_tokens = args.vda_max_turns * (
+                vda_action_tokens + vda_observation_tokens
+            )
+            vda_trajectory_tokens = int(
+                os.environ.get(
+                    "AGZ_VDA_TRAJECTORY_TOKENS", str(computed_trajectory_tokens)
                 )
+            )
+            vda_model_tokens = int(
+                os.environ.get(
+                    "AGZ_VDA_MODEL_TOKENS",
+                    str(2048 + vda_trajectory_tokens + vda_action_tokens),
+                )
+            )
+            if not training_done:
                 environment = os.environ.copy()
                 environment.update(
                     {
@@ -763,7 +1007,10 @@ def main() -> None:
                         "AGZ_EXPERIMENT_VARIANT": args.experiment_variant,
                         "AGZ_N_GPUS_PER_NODE": str(len(gpu_ids)),
                         "AGZ_BATCH_SIZE": str(args.vda_batch_size),
-                        "AGZ_PPO_MINI_BATCH_SIZE": str(args.vda_batch_size),
+                        "AGZ_PPO_MINI_BATCH_SIZE": os.environ.get(
+                            "AGZ_VDA_PPO_MINI_BATCH_SIZE",
+                            str(args.vda_batch_size),
+                        ),
                         "AGZ_ROLLOUT_N": str(args.vda_rollout_n),
                         "AGZ_ADV_ESTIMATOR": "reinforce_plus_plus",
                         "AGZ_TOOL_SERVER_MODE": "level1",
@@ -771,11 +1018,15 @@ def main() -> None:
                         "AGZ_AGENT_MAX_TURNS": str(args.vda_max_turns),
                         "AGZ_MAX_PROMPT_LENGTH": "2048",
                         "AGZ_MAX_RESPONSE_LENGTH": str(vda_trajectory_tokens),
+                        "AGZ_MAX_MODEL_LENGTH": str(vda_model_tokens),
                         "AGZ_MAX_ACTION_LENGTH": str(vda_action_tokens),
                         "AGZ_MAX_OBS_LENGTH": str(vda_observation_tokens),
                         "AGZ_GPU_MEMORY_UTILIZATION": "0.35",
                         "AGZ_MAX_NUM_SEQS": (
-                            "8" if args.backbone == "qwen3.5-4b" else "4"
+                            os.environ.get(
+                                "AGZ_VDA_MAX_NUM_SEQS",
+                                "8" if args.backbone == "qwen3.5-4b" else "4",
+                            )
                         ),
                         "AGZ_LORA_RANK": "16",
                         "AGZ_LORA_ALPHA": "32",
@@ -800,7 +1051,9 @@ def main() -> None:
                         "AGZ_SEED": str(args.seed),
                         "AGZ_VAL_BEFORE_TRAIN": "False",
                         "AGZ_DATA_SHUFFLE": "false",
-                        "AGZ_SAVE_FREQ": str(target_steps),
+                        "AGZ_SAVE_FREQ": os.environ.get(
+                            "AGZ_VDA_SAVE_FREQ", str(target_steps)
+                        ),
                         "AGZ_TEST_FREQ": "0",
                     }
                 )
@@ -821,12 +1074,25 @@ def main() -> None:
                 training_config={
                     "protocol": "dca_first_alternating",
                     "tmcd_protocol_version": "tmcd-v2",
+                    "tmcd_release_revision": TMCD_RELEASE_REVISION,
                     "experiment_variant": args.experiment_variant,
                     "artifact_scope": args.artifact_scope,
                     "execution_host": execution_host,
                     "allocated_gpus": gpu_ids,
                     "world_size": len(gpu_ids),
                     "candidate_pool_size": args.vda_candidates,
+                    "candidate_generation_batch_size": args.candidate_batch_size,
+                    "candidate_generation_prompt_version": DCA_PROMPT_VERSION,
+                    "candidate_normalization_version": DCA_CANDIDATE_NORMALIZATION_VERSION,
+                    "candidate_generation_max_attempts": candidate_max_attempts,
+                    "candidate_attention_implementation": os.environ.get(
+                        "AGZ_DCA_CANDIDATE_ATTN_IMPLEMENTATION", "sdpa"
+                    ),
+                    "candidate_partial_fsync_every_batches": int(
+                        os.environ.get(
+                            "AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES", "1"
+                        )
+                    ),
                     "train_size": args.vda_train_size,
                     "dev_size": args.vda_dev_size,
                     "xplay_size": args.vda_xplay_size,
@@ -836,9 +1102,16 @@ def main() -> None:
                     "round_steps": vda_round_steps,
                     "max_turns": args.vda_max_turns,
                     "max_prompt_length": 2048,
-                    "max_trajectory_response_length": args.vda_max_turns * (384 + 512),
-                    "max_action_length": 384,
-                    "max_observation_length": 512,
+                    "max_trajectory_response_length": vda_trajectory_tokens,
+                    "max_model_length": vda_model_tokens,
+                    "max_action_length": vda_action_tokens,
+                    "max_observation_length": vda_observation_tokens,
+                    "ppo_mini_batch_size": int(
+                        os.environ.get(
+                            "AGZ_VDA_PPO_MINI_BATCH_SIZE",
+                            str(args.vda_batch_size),
+                        )
+                    ),
                     "ppo_micro_batch_size_per_gpu": int(
                         os.environ.get(
                             "AGZ_VDA_PPO_MICRO_BATCH_SIZE_PER_GPU", "2"
@@ -856,6 +1129,12 @@ def main() -> None:
                 backbone=args.backbone,
                 round_index=target_round,
             )
+            if str(
+                (vda_target.get("training_config", {}) or {}).get(
+                    "tmcd_release_revision", ""
+                )
+            ) != TMCD_RELEASE_REVISION:
+                raise LineageError("VDA checkpoint release revision mismatch")
             if dca_target.get("adapter_sha256") == vda_target.get("adapter_sha256"):
                 raise LineageError("DCA and VDA adapters have the same hash")
             lineage = validate_round_lineage(
@@ -879,6 +1158,12 @@ def main() -> None:
             backbone=args.backbone,
             round_index=target_round,
         )
+        if str(
+            (vda_target.get("training_config", {}) or {}).get(
+                "tmcd_release_revision", ""
+            )
+        ) != TMCD_RELEASE_REVISION:
+            raise LineageError("VDA checkpoint release revision mismatch")
     except Exception as exc:
         _mark_failed(state_path, stage, exc)
         raise
@@ -945,13 +1230,22 @@ def main() -> None:
         "seed": args.seed,
         "execution_host": execution_host,
         "allocated_gpus": gpu_ids,
-        "protocol": [
-            f"DCA_{args.source_round} generates feedback candidates",
-            f"VDA_{args.source_round} produces rollout feedback",
-            f"DCA_{args.source_round} updates to DCA_{target_round}",
-            f"DCA_{target_round} generates a fresh disjoint pool",
-            f"VDA_{args.source_round} updates to VDA_{target_round}",
-        ],
+        "protocol": (
+            [
+                f"DCA_{args.source_round} generates feedback candidates",
+                f"VDA_{args.source_round} produces rollout feedback",
+                f"DCA_{args.source_round} updates to DCA_{target_round}",
+                f"DCA_{target_round} generates a fresh disjoint pool",
+                f"VDA_{args.source_round} updates to VDA_{target_round}",
+            ]
+            if variant.train_dca
+            else [
+                f"DCA_{args.source_round} remains frozen as DCA_{target_round}",
+                f"frozen DCA_{target_round} generates a fresh pool",
+                f"VDA_{args.source_round} updates to VDA_{target_round}",
+            ]
+        ),
+        "dca_parameter_update": bool(variant.train_dca),
         "dca_parent_manifest": str(dca_parent_path),
         "dca_target_manifest": str(dca_target_manifest_path),
         "vda_parent_manifest": str(vda_parent_path),

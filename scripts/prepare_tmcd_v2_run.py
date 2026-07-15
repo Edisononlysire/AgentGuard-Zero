@@ -15,7 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agentguard_zero.training.coevolution import atomic_write_json, sha256_file, sha256_tree, utc_now
+from agentguard_zero.training.coevolution import (
+    atomic_write_json,
+    sha256_file,
+    sha256_source_tree,
+    utc_now,
+)
+from agentguard_zero.protocol import TMCD_PROTOCOL_VERSION, TMCD_RELEASE_REVISION
 
 
 MANIFEST_NAMES = (
@@ -28,6 +34,16 @@ MANIFEST_NAMES = (
 TRAINING_FRAMEWORK_FILES = (
     "third_party/verl_tool/trainer/main_ppo.py",
     "third_party/verl/verl/trainer/main_ppo.py",
+    "third_party/verl/verl/workers/fsdp_workers.py",
+    "third_party/verl_tool/llm_agent/manager.py",
+)
+
+SOURCE_TREE_DIRS = (
+    "agentguard_zero",
+    "curriculum",
+    "scripts",
+    "third_party/verl_tool",
+    "third_party/verl/verl",
 )
 
 
@@ -68,8 +84,10 @@ def main() -> None:
         if not source_path.is_file():
             raise SystemExit(f"missing protocol manifest: {source_path}")
         payload = json.loads(source_path.read_text(encoding="utf-8"))
-        if payload.get("protocol_version") != "tmcd-v2":
+        if payload.get("protocol_version") != TMCD_PROTOCOL_VERSION:
             raise SystemExit(f"wrong protocol version in {source_path}")
+        if name == "protocol.json" and payload.get("release_revision") != TMCD_RELEASE_REVISION:
+            raise SystemExit(f"wrong protocol release revision in {source_path}")
         target = destination / name
         if target.exists() and sha256_file(target) != sha256_file(source_path):
             raise SystemExit(f"frozen manifest differs from source: {target}")
@@ -81,15 +99,23 @@ def main() -> None:
         if not framework_path.is_file():
             raise SystemExit(f"missing training framework entry point: {framework_path}")
         training_framework[relative_path] = sha256_file(framework_path)
+    source_trees = {}
+    for relative_path in SOURCE_TREE_DIRS:
+        source_path = root / relative_path
+        if not source_path.is_dir():
+            raise SystemExit(f"missing frozen source tree: {source_path}")
+        source_trees[relative_path] = sha256_source_tree(source_path)
     source_manifest = {
-        "protocol_version": "tmcd-v2",
+        "protocol_version": TMCD_PROTOCOL_VERSION,
+        "release_revision": TMCD_RELEASE_REVISION,
         "kind": "source_freeze",
         "created_at": utc_now(),
         "git_commit": git_commit,
         "git_branch": git_branch,
         "git_dirty": bool(dirty),
-        "source_tree_sha256": sha256_tree(root / "agentguard_zero"),
-        "scripts_tree_sha256": sha256_tree(root / "scripts"),
+        "source_tree_sha256": source_trees["agentguard_zero"],
+        "scripts_tree_sha256": source_trees["scripts"],
+        "source_trees": source_trees,
         "training_framework": training_framework,
         "manifests": copied,
     }

@@ -13,6 +13,7 @@ def make_observation_v4(
     evidence_snapshot: list[dict[str, Any]],
     trust_snapshot: dict[str, Any],
     memory_retrieval: dict[str, Any],
+    public_assets: list[dict[str, Any]],
     remaining_business_budget: float,
     verification_remaining: float,
     last_tool_result: dict[str, Any] | None,
@@ -30,6 +31,7 @@ def make_observation_v4(
             "probe_state": copy.deepcopy(public_probe_state),
         },
         "defense_context": {
+            "public_assets": copy.deepcopy(public_assets),
             "remaining_business_budget": float(remaining_business_budget),
             "remaining_verification_budget": float(verification_remaining),
         },
@@ -37,4 +39,3 @@ def make_observation_v4(
     }
     assert_public(observation)
     return observation
-

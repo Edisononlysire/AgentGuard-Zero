@@ -49,17 +49,30 @@ class AppendOnlyProfileMemory(EvidenceStateMemory):
                 continue
             claim_key = canonical_claim_key(claim)
             memory_id = self.claim_index.get(claim_key, self._memory_id(claim_key))
+            derived_source_ids = evidence_store.root_sources(refs, time=time)
+            declared_source_ids = sorted(
+                {str(item) for item in operation.get("source_ids", []) if str(item)}
+            )
+            if declared_source_ids and declared_source_ids != derived_source_ids:
+                results.append(
+                    {
+                        "committed": False,
+                        "op": op,
+                        "reason": "source_lineage_mismatch",
+                        "derived_source_ids": derived_source_ids,
+                    }
+                )
+                continue
             target = str(operation.get("target_status", "quarantined"))
             if target not in MEMORY_STATUSES:
                 target = "quarantined"
             if memory_id not in self.records:
-                source_ids = sorted({str(item) for item in operation.get("source_ids", []) if str(item)})
                 self.records[memory_id] = {
                     "memory_id": memory_id,
                     "claim_key": claim_key,
                     "claim": claim,
                     "entity_id": str(claim.get("entity_id", "")),
-                    "source_ids": source_ids,
+                    "source_ids": derived_source_ids,
                     "status": target,
                     "confidence": 0.5,
                     "created_at": int(time),
@@ -70,6 +83,7 @@ class AppendOnlyProfileMemory(EvidenceStateMemory):
                     "contradiction_refs": sorted(set(refs)) if target == "rejected" else [],
                     "retrieval_count": 0,
                     "acceptance_count": 0,
+                    "usage_counts": {"support": 0, "contradict": 0, "background": 0},
                     "last_retrieved_at": None,
                     "last_used_for_action": None,
                     "transition_history": [

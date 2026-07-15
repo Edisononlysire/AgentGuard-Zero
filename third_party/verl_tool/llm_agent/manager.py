@@ -997,7 +997,6 @@ class AgentActorManager:
         # Log performance statistics
         perf_timer.log_stats(logger, f"[PERF] Batch size: {gen_batch.batch['input_ids'].shape[0]} - ")
 
-        results.save_to_disk("test.pkl")
         return results
 
     def run_llm_loop(self, gen_batch: DataProto, **sampling_params: Dict[str, Any]) -> Tuple[Dict, Dict]:
@@ -1223,8 +1222,21 @@ class AgentActorManager:
                     url=self.config.tool_server_url,
                     json=data,
                 ) as resp:
-                    data = await resp.json()
-                    return data
+                    response_data = await resp.json()
+                    if resp.status != 200:
+                        detail = response_data.get("error", "unknown error") if isinstance(response_data, dict) else "invalid JSON object"
+                        raise RuntimeError(f"tool server HTTP {resp.status}: {detail}")
+                    if not isinstance(response_data, dict):
+                        raise ValueError("tool server response is not a JSON object")
+                    expected = len(data.get("trajectory_ids", []))
+                    for key in ("observations", "dones", "valids"):
+                        values = response_data.get(key)
+                        if not isinstance(values, list) or len(values) != expected:
+                            raise ValueError(
+                                f"tool server response field {key!r} has invalid length: "
+                                f"expected {expected}, got {len(values) if isinstance(values, list) else 'non-list'}"
+                            )
+                    return response_data
             except asyncio.TimeoutError as e:
                 if attempt == max_retries - 1:
                     raise e

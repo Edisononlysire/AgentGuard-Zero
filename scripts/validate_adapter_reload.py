@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independently reload one trained AgentGuard-Zero LoRA adapter."""
+"""Independently reload one AgentGuard-Zero checkpoint or frozen base model."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def main() -> None:
         backbone=str(raw.get("backbone", "")),
         round_index=int(raw.get("round", -1)),
     )
-    if not manifest.get("adapter_path"):
+    if not manifest.get("adapter_path") and manifest.get("status") != "frozen":
         raise SystemExit("trained adapter path is missing")
 
     dtype = {
@@ -73,7 +73,11 @@ def main() -> None:
         low_cpu_mem_usage=True,
         attn_implementation="sdpa",
     )
-    model = PeftModel.from_pretrained(base, manifest["adapter_path"])
+    model = (
+        PeftModel.from_pretrained(base, manifest["adapter_path"])
+        if manifest.get("adapter_path")
+        else base
+    )
     model.to(args.device)
     model.eval()
 
@@ -89,8 +93,13 @@ def main() -> None:
         "adapter_path": manifest["adapter_path"],
         "adapter_sha256": manifest["adapter_sha256"],
         "model_class": type(base).__name__,
-        "peft_model_class": type(model).__name__,
-        "active_adapter": str(getattr(model, "active_adapter", "default")),
+        "reload_mode": "lora_adapter" if manifest.get("adapter_path") else "frozen_base",
+        "peft_model_class": type(model).__name__ if manifest.get("adapter_path") else None,
+        "active_adapter": (
+            str(getattr(model, "active_adapter", "default"))
+            if manifest.get("adapter_path")
+            else None
+        ),
         "device": str(next(model.parameters()).device),
         "dtype": str(next(model.parameters()).dtype),
         "reload_ok": True,

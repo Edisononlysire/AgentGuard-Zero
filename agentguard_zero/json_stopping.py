@@ -14,11 +14,22 @@ class CompleteJSONObjectCriteria(StoppingCriteria):
         self.in_string = [False] * batch_size
         self.escaped = [False] * batch_size
         self.done = [False] * batch_size
+        self._piece_cache: dict[int, str] = {}
 
     def __call__(self, input_ids, scores, **kwargs):
-        pieces = self.tokenizer.batch_decode(
-            input_ids[:, -1:], skip_special_tokens=False, clean_up_tokenization_spaces=False
-        )
+        token_ids = input_ids[:, -1].detach().cpu().tolist()
+        pieces = []
+        for token_id in token_ids:
+            token_id = int(token_id)
+            piece = self._piece_cache.get(token_id)
+            if piece is None:
+                piece = self.tokenizer.decode(
+                    [token_id],
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+                self._piece_cache[token_id] = piece
+            pieces.append(piece)
         for index, piece in enumerate(pieces):
             if self.done[index]:
                 continue

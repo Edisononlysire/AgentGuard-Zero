@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agentguard_zero.training.coevolution import atomic_write_json, utc_now
+from agentguard_zero.protocol import TMCD_RELEASE_REVISION
 
 
 def merge_candidate_shards(paths: list[Path], expected_count: int) -> dict[str, Any]:
@@ -27,6 +28,36 @@ def merge_candidate_shards(paths: list[Path], expected_count: int) -> dict[str, 
     }
     if "" in source_hashes or len(source_hashes) != 1:
         raise ValueError("candidate shards do not share one DCA checkpoint manifest hash")
+    variants = {str(shard.get("experiment_variant", "")) for shard in shards}
+    if "" in variants or len(variants) != 1:
+        raise ValueError("candidate shards do not share one experiment variant")
+    prompt_versions = {
+        int(shard.get("generation_prompt_version", -1)) for shard in shards
+    }
+    if len(prompt_versions) != 1 or next(iter(prompt_versions)) <= 0:
+        raise ValueError("candidate shards do not share one valid generation prompt version")
+    normalization_versions = {
+        int(shard.get("candidate_normalization_version", -1)) for shard in shards
+    }
+    if len(normalization_versions) != 1 or next(iter(normalization_versions)) <= 0:
+        raise ValueError("candidate shards do not share one valid normalization version")
+    release_revisions = {
+        str(shard.get("tmcd_release_revision", "")) for shard in shards
+    }
+    if release_revisions != {TMCD_RELEASE_REVISION}:
+        raise ValueError("candidate shards do not match the active TMCD release revision")
+    max_attempts = {int(shard.get("max_attempts", -1)) for shard in shards}
+    if len(max_attempts) != 1 or next(iter(max_attempts)) <= 0:
+        raise ValueError("candidate shards do not share one valid retry budget")
+    backbones = {str(shard.get("backbone", "")) for shard in shards}
+    source_rounds = {int(shard.get("source_dca_round", -1)) for shard in shards}
+    seeds = {int(shard.get("seed", -1)) for shard in shards}
+    if "" in backbones or len(backbones) != 1:
+        raise ValueError("candidate shards do not share one backbone")
+    if len(source_rounds) != 1 or next(iter(source_rounds)) < 1:
+        raise ValueError("candidate shards do not share one trained DCA round")
+    if len(seeds) != 1:
+        raise ValueError("candidate shards do not share one generation seed")
     indices = {int(shard.get("shard_index", -1)) for shard in shards}
     declared_counts = {int(shard.get("num_shards", -1)) for shard in shards}
     if indices != set(range(shard_count)) or declared_counts != {shard_count}:
@@ -58,6 +89,11 @@ def merge_candidate_shards(paths: list[Path], expected_count: int) -> dict[str, 
         "created_at": utc_now(),
         "seed": first.get("seed"),
         "backbone": first.get("backbone"),
+        "experiment_variant": next(iter(variants)),
+        "generation_prompt_version": next(iter(prompt_versions)),
+        "candidate_normalization_version": next(iter(normalization_versions)),
+        "tmcd_release_revision": TMCD_RELEASE_REVISION,
+        "max_attempts": next(iter(max_attempts)),
         "source_dca_round": first.get("source_dca_round"),
         "source_dca_checkpoint_manifest": first.get("source_dca_checkpoint_manifest"),
         "source_dca_checkpoint_manifest_sha256": next(iter(source_hashes)),

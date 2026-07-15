@@ -13,15 +13,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
-
 ROOT = Path(__file__).resolve().parents[1]
 for path in (ROOT, ROOT / "scripts"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 from agentguard_zero.env.checker import full_check
+from agentguard_zero.protocol import TMCD_RELEASE_REVISION
 from agentguard_zero.training.coevolution import (
     LineageError,
     atomic_write_json,
@@ -35,6 +33,7 @@ from agentguard_zero.training.coevolution import (
 )
 from agentguard_zero.training.vda_dataset import scenario_to_training_row
 from agentguard_zero.schemas.scenario_schema_v2 import paired_counterpart_v2, validate_pair_v2
+from agentguard_zero.variants import experiment_variant
 from generate_level1_frontier import compute_cfc_metrics
 
 
@@ -58,6 +57,8 @@ def _task_id(record: dict[str, Any], scenario: dict[str, Any]) -> str:
 
 
 def _write_parquet(path: Path, rows: list[dict[str, Any]]) -> None:
+    import pandas as pd
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".parquet", dir=str(path.parent))
     os.close(fd)
@@ -69,17 +70,8 @@ def _write_parquet(path: Path, rows: list[dict[str, Any]]) -> None:
             os.unlink(temporary)
 
 
-def _split_stratified(
-    items: list[dict[str, Any]], split_counts: dict[str, int], seed: int
-) -> dict[str, list[dict[str, Any]]]:
-    by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for item in items:
-        by_task[item["task_id"]].append(item)
-    for values in by_task.values():
-        values.sort(key=lambda item: float(item["cfc"].get("frontier_score", 0.0)), reverse=True)
-
-    rng = random.Random(seed)
-    split_items: dict[str, list[dict[str, Any]]] = {}
+def _split_task_quotas(split_counts: dict[str, int]) -> dict[str, dict[str, int]]:
+    quotas: dict[str, dict[str, int]] = {}
     remainder_offset = 0
     for split, count in split_counts.items():
         base, remainder = divmod(count, len(TASK_IDS))
@@ -87,45 +79,139 @@ def _split_stratified(
         for offset in range(remainder):
             quota[TASK_IDS[(remainder_offset + offset) % len(TASK_IDS)]] += 1
         remainder_offset = (remainder_offset + remainder) % len(TASK_IDS)
+        quotas[split] = quota
+    return quotas
 
-        selected: list[dict[str, Any]] = []
-        for task_id in TASK_IDS:
-            required = quota[task_id]
-            available = by_task.get(task_id, [])
-            if task_id == "T2":
-                if required % 2:
-                    raise LineageError("T2 split quota must be even so paired branches stay together")
-                grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-                for item in available:
-                    grouped[str(item["scenario"].get("pair_id", ""))].append(item)
-                complete_pairs = [
-                    sorted(values, key=lambda row: str(row["scenario"].get("trajectory_type", "")))
-                    for values in grouped.values()
-                    if {str(row["scenario"].get("trajectory_type")) for row in values}
-                    == {"betrayal", "legitimate_change"}
-                ]
-                complete_pairs.sort(
-                    key=lambda values: max(float(row["cfc"].get("frontier_score", 0.0)) for row in values),
-                    reverse=True,
-                )
-                chosen = [row for pair in complete_pairs[: required // 2] for row in pair]
-                if len(chosen) < required:
-                    raise LineageError(
-                        f"task T2 has {len(complete_pairs)} complete pairs, split {split} requires {required // 2}"
-                    )
-                selected.extend(chosen)
-                chosen_ids = {id(row) for row in chosen}
-                by_task[task_id] = [row for row in available if id(row) not in chosen_ids]
-                continue
-            if len(available) < required:
+
+def _split_stratified(
+    items: list[dict[str, Any]],
+    split_counts: dict[str, int],
+    seed: int,
+    *,
+    rank_by_frontier: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
+    by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        by_task[item["task_id"]].append(item)
+    rng = random.Random(seed)
+    task_quotas = _split_task_quotas(split_counts)
+    split_items: dict[str, list[dict[str, Any]]] = {
+        split: [] for split in split_counts
+    }
+
+    def unit_score(unit: list[dict[str, Any]]) -> float:
+        return max(float(row["cfc"].get("frontier_score", 0.0)) for row in unit)
+
+    def allocate_units(
+        units: list[list[dict[str, Any]]],
+        quotas: dict[str, int],
+    ) -> dict[str, list[list[dict[str, Any]]]]:
+        required = sum(quotas.values())
+        if len(units) < required:
+            raise LineageError(
+                f"only {len(units)} eligible units for {required} requested"
+            )
+        if rank_by_frontier:
+            selected = sorted(units, key=unit_score, reverse=True)[:required]
+            strata = min(10, required)
+            for stratum in range(strata):
+                start = stratum * required // strata
+                end = (stratum + 1) * required // strata
+                bucket = selected[start:end]
+                rng.shuffle(bucket)
+                selected[start:end] = bucket
+        else:
+            selected = list(units)
+            rng.shuffle(selected)
+            selected = selected[:required]
+
+        allocated = {split: [] for split in quotas}
+        assigned = {split: 0 for split in quotas}
+        tie_order = list(quotas)
+        rng.shuffle(tie_order)
+        tie_rank = {split: index for index, split in enumerate(tie_order)}
+        for position, unit in enumerate(selected, start=1):
+            eligible = [
+                split for split in quotas if assigned[split] < quotas[split]
+            ]
+            split = max(
+                eligible,
+                key=lambda name: (
+                    quotas[name] * position / required - assigned[name],
+                    -tie_rank[name],
+                ),
+            )
+            allocated[split].append(unit)
+            assigned[split] += 1
+        if assigned != quotas:
+            raise LineageError(
+                f"difficulty-stratified allocation mismatch: {assigned} != {quotas}"
+            )
+        return allocated
+
+    for task_id in TASK_IDS:
+        values = by_task.get(task_id, [])
+        if task_id == "T2":
+            grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for item in values:
+                pair_id = str(item["scenario"].get("pair_id", "")).strip()
+                if not pair_id:
+                    raise LineageError("T2 candidate is missing pair_id")
+                grouped[pair_id].append(item)
+            invalid_pairs = {
+                pair_id: len(pair)
+                for pair_id, pair in grouped.items()
+                if len(pair) != 2
+                or {
+                    str(row["scenario"].get("trajectory_type", ""))
+                    for row in pair
+                }
+                != {"betrayal", "legitimate_change"}
+            }
+            if invalid_pairs:
                 raise LineageError(
-                    f"task {task_id} has {len(available)} eligible candidates, "
-                    f"but split {split} requires {required}"
+                    "T2 pair IDs must identify exactly one betrayal/change pair: "
+                    f"{dict(list(invalid_pairs.items())[:8])}"
                 )
-            selected.extend(available[:required])
-            del available[:required]
+            units = [
+                sorted(
+                    pair,
+                    key=lambda row: str(row["scenario"].get("trajectory_type", "")),
+                )
+                for pair in grouped.values()
+            ]
+            unit_quotas: dict[str, int] = {}
+            for split in split_counts:
+                required = task_quotas[split][task_id]
+                if required % 2:
+                    raise LineageError(
+                        "T2 split quota must be even so paired branches stay together"
+                    )
+                unit_quotas[split] = required // 2
+        else:
+            units = [[item] for item in values]
+            unit_quotas = {
+                split: task_quotas[split][task_id] for split in split_counts
+            }
+
+        allocated = allocate_units(units, unit_quotas)
+        for split, selected_units in allocated.items():
+            split_items[split].extend(
+                row for unit in selected_units for row in unit
+            )
+
+    for split, selected in split_items.items():
         rng.shuffle(selected)
-        split_items[split] = selected
+        actual_task_counts = Counter(item["task_id"] for item in selected)
+        if len(selected) != split_counts[split]:
+            raise LineageError(
+                f"split {split} has {len(selected)} rows, expected {split_counts[split]}"
+            )
+        if actual_task_counts != Counter(task_quotas[split]):
+            raise LineageError(
+                f"split {split} task quotas mismatch: "
+                f"{dict(actual_task_counts)} != {task_quotas[split]}"
+            )
     return split_items
 
 
@@ -246,16 +332,35 @@ def main() -> None:
         round_index=target_round,
     )
     dca_manifest_sha = sha256_file(dca_manifest_path)
-    experiment_variant = str(
+    variant_name = str(
         dca_manifest.get("training_config", {}).get("experiment_variant", "full")
     )
+    variant = experiment_variant(variant_name)
     if pool.get("kind") != "dca_candidate_pool":
         raise LineageError("candidate input is not a dca_candidate_pool")
+    if int(pool.get("num_candidates_generated", -1)) != len(
+        pool.get("candidates", []) or []
+    ):
+        raise LineageError("candidate pool count does not match its records")
+    if int(pool.get("generation_prompt_version", 0)) <= 0:
+        raise LineageError("candidate pool is missing a generation prompt version")
+    if int(pool.get("candidate_normalization_version", 0)) <= 0:
+        raise LineageError("candidate pool is missing a normalization version")
+    if str(pool.get("tmcd_release_revision", "")) != TMCD_RELEASE_REVISION:
+        raise LineageError("candidate pool does not match the active TMCD release revision")
+    if str(
+        (dca_manifest.get("training_config", {}) or {}).get(
+            "tmcd_release_revision", ""
+        )
+    ) != TMCD_RELEASE_REVISION:
+        raise LineageError("DCA checkpoint does not match the active TMCD release revision")
+    if int(pool.get("max_attempts", 0)) <= 0:
+        raise LineageError("candidate pool is missing a positive retry budget")
     if int(pool.get("source_dca_round", -1)) != target_round:
         raise LineageError("candidate pool DCA round does not match checkpoint")
     if pool.get("source_dca_checkpoint_manifest_sha256") != dca_manifest_sha:
         raise LineageError("candidate pool checkpoint hash does not match DCA manifest")
-    if str(pool.get("experiment_variant", "full")) != experiment_variant:
+    if str(pool.get("experiment_variant", "full")) != variant_name:
         raise LineageError("candidate pool experiment variant does not match DCA manifest")
     if parse_utc(pool["created_at"]) < parse_utc(dca_manifest["created_at"]):
         raise LineageError("candidate pool predates DCA_{r+1} checkpoint")
@@ -281,7 +386,7 @@ def main() -> None:
             excluded["duplicate"] += 1
             continue
         metadata = scenario.get("metadata", {}) or {}
-        if str(metadata.get("experiment_variant", "full")) != experiment_variant:
+        if str(metadata.get("experiment_variant", "full")) != variant_name:
             excluded["wrong_experiment_variant"] += 1
             continue
         if int(metadata.get("source_dca_round", -1)) != target_round:
@@ -298,7 +403,10 @@ def main() -> None:
         if cfc is None:
             excluded["cfc_exception"] += 1
             continue
-        if not cfc.get("oracle_solvable", False) or float(cfc.get("frontier_score", 0.0)) <= 0.0:
+        if not cfc.get("oracle_solvable", False) or (
+            variant.frontier_filtering
+            and float(cfc.get("frontier_score", 0.0)) <= 0.0
+        ):
             excluded["not_hard_but_solvable"] += 1
             continue
         seen.add(fingerprint)
@@ -308,7 +416,6 @@ def main() -> None:
             "task_id": _task_id(record, scenario),
             "cfc": cfc,
         }
-        valid.append(base_item)
         if base_item["task_id"] == "T2" and scenario.get("protocol_version") == "tmcd-v2":
             counterpart = paired_counterpart_v2(scenario)
             pair_ok, pair_reason = validate_pair_v2(scenario, counterpart)
@@ -316,6 +423,7 @@ def main() -> None:
             counterpart_cfc = _safe_cfc_metrics(counterpart)
             if not pair_ok or not counterpart_checks.get("all_ok", False) or counterpart_cfc is None:
                 excluded[f"invalid_t2_counterpart:{pair_reason}"] += 1
+                continue
             else:
                 counterpart_metadata = dict(counterpart.get("metadata", {}) or {})
                 counterpart_metadata.update(
@@ -331,6 +439,7 @@ def main() -> None:
                     excluded["t2_counterpart_overlap"] += 1
                     continue
                 seen.add(counterpart_fingerprint)
+                valid.append(base_item)
                 valid.append(
                     {
                         **record,
@@ -342,6 +451,8 @@ def main() -> None:
                         "derived_counterpart": True,
                     }
                 )
+        else:
+            valid.append(base_item)
 
     if len(valid) < requested:
         raise LineageError(
@@ -349,10 +460,36 @@ def main() -> None:
             f"excluded={dict(excluded)}"
         )
 
+    split_counts = {
+        "train": args.train_size,
+        "dev": args.dev_size,
+        "xplay": args.xplay_size,
+    }
+    eligible_task_counts = Counter(item["task_id"] for item in valid)
+    quotas = _split_task_quotas(split_counts)
+    required_task_counts = {
+        task_id: sum(quota[task_id] for quota in quotas.values())
+        for task_id in TASK_IDS
+    }
+    shortages = {
+        task_id: {
+            "eligible": int(eligible_task_counts.get(task_id, 0)),
+            "required": required,
+        }
+        for task_id, required in required_task_counts.items()
+        if eligible_task_counts.get(task_id, 0) < required
+    }
+    if shortages:
+        raise LineageError(
+            "candidate pool cannot satisfy all task quotas before splitting: "
+            f"shortages={shortages}, eligible={dict(eligible_task_counts)}"
+        )
+
     split_items = _split_stratified(
         valid,
-        {"train": args.train_size, "dev": args.dev_size, "xplay": args.xplay_size},
+        split_counts,
         args.seed,
+        rank_by_frontier=variant.frontier_filtering,
     )
     split_items["train"] = _task_batched_order(
         split_items["train"], args.train_batch_size, args.seed + 17
@@ -373,7 +510,7 @@ def main() -> None:
                 target_round=target_round,
                 candidate_pool_path=candidate_path,
                 candidate_pool_sha=candidate_pool_sha,
-                dca_adapter_sha=str(dca_manifest.get("adapter_sha256", "")),
+                dca_adapter_sha=str(dca_manifest.get("adapter_sha256") or ""),
                 base_model_sha=str(dca_manifest.get("base_model", {}).get("identity_sha256", "")),
             )
             for item in items
@@ -408,7 +545,13 @@ def main() -> None:
         "backbone": backbone,
         "target_round": target_round,
         "protocol_version": "tmcd-v2",
-        "experiment_variant": experiment_variant,
+        "experiment_variant": variant_name,
+        "frontier_filtering_enabled": bool(variant.frontier_filtering),
+        "selection_policy": (
+            "security_cfc_top_pool_difficulty_stratified"
+            if variant.frontier_filtering
+            else "safety_valid_oracle_solvable_stratified_random"
+        ),
         "source_dca_checkpoint_manifest": str(dca_manifest_path),
         "source_dca_checkpoint_manifest_sha256": dca_manifest_sha,
         "source_dca_adapter_sha256": dca_manifest.get("adapter_sha256"),
@@ -419,13 +562,20 @@ def main() -> None:
         "feedback_fingerprint_count": len(feedback),
         "feedback_vda_overlap_count": 0,
         "candidate_count": len(pool.get("candidates", []) or []),
+        "candidate_generation_prompt_version": pool.get("generation_prompt_version"),
+        "candidate_normalization_version": pool.get("candidate_normalization_version"),
+        "tmcd_release_revision": TMCD_RELEASE_REVISION,
+        "candidate_generation_max_attempts": pool.get("max_attempts"),
         "eligible_count": len(valid),
+        "eligible_task_counts": dict(eligible_task_counts),
+        "required_task_counts": required_task_counts,
         "selected_count": len(selected),
         "excluded_counts": dict(excluded),
         "split_counts": {split: len(items) for split, items in split_items.items()},
         "split_task_counts": {
             split: dict(Counter(item["task_id"] for item in items)) for split, items in split_items.items()
         },
+        "difficulty_split_policy": "frontier_score_top_pool_then_rank_stratified",
         "train_ordering": (
             f"task_batched_{args.train_batch_size}"
             if args.train_batch_size > 0

@@ -27,6 +27,15 @@ def _context_features(observed_events: list[dict[str, Any]]) -> dict[str, set[st
     }
 
 
+def _claim_terms(claim: dict[str, Any]) -> set[str]:
+    return set().union(
+        *(
+            _tokens(claim.get(key, ""))
+            for key in ("entity_id", "predicate", "object", "scope", "text")
+        )
+    )
+
+
 def retrieve_memory(
     memory: EvidenceStateMemory,
     observed_events: list[dict[str, Any]],
@@ -42,15 +51,26 @@ def retrieve_memory(
         if status not in grouped:
             continue
         claim = record.get("claim", {}) or {}
+        term_overlap = _claim_terms(claim) & features["terms"]
+        eligible = bool(
+            str(claim.get("entity_id", "")) in features["entities"]
+            or set(record.get("source_ids", [])) & features["sources"]
+            or str(claim.get("scope", "")) in features["objectives"]
+            or str(claim.get("predicate", "")) in features["types"]
+            or term_overlap
+        )
+        if not eligible:
+            continue
         score = 0.0
         score += 3.0 if str(claim.get("entity_id", "")) in features["entities"] else 0.0
         score += 2.0 * len(set(record.get("source_ids", [])) & features["sources"])
         score += 2.0 if str(claim.get("scope", "")) in features["objectives"] else 0.0
         score += 1.0 if str(claim.get("predicate", "")) in features["types"] else 0.0
-        score += min(1.0, len(_tokens(claim.get("text", "")) & features["terms"]) * 0.25)
+        score += min(1.0, len(term_overlap) * 0.25)
         age = max(0, int(time) - int(record.get("updated_at", time)))
         score += 0.5 / (1.0 + age)
-        grouped[status].append((score, memory_id))
+        if score >= 1.0:
+            grouped[status].append((score, memory_id))
 
     result: dict[str, Any] = {"retrieval_id": f"retrieval-t{int(time)}"}
     key_map = {
@@ -69,4 +89,3 @@ def retrieve_memory(
         retrieved_ids.extend(selected)
     result["retrieved_memory_ids"] = retrieved_ids
     return result
-

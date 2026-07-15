@@ -56,6 +56,7 @@ case "${DCA_GPU_LAYOUT}" in
 esac
 PORT_A=${AGZ_VDA_FEEDBACK_PORT_A:-31501}
 HOST=${AGZ_VDA_FEEDBACK_HOST:-127.0.0.1}
+VDA_FEEDBACK_ATTN_IMPLEMENTATION=${AGZ_VDA_FEEDBACK_ATTN_IMPLEMENTATION:-sdpa}
 
 BATCH_SIZE=${AGZ_BATCH_SIZE:-2}
 PPO_MINI_BATCH_SIZE=${AGZ_PPO_MINI_BATCH_SIZE:-${BATCH_SIZE}}
@@ -116,6 +117,9 @@ for index in "${!GPU_IDS[@]}"; do
     --max-turns "${AGZ_VDA_FEEDBACK_MAX_TURNS:-5}" \
     --max-input-tokens "${AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS:-2048}" \
     --max-new-tokens "${AGZ_VDA_FEEDBACK_MAX_NEW_TOKENS:-384}" \
+    --continuation-prompt-mode "${AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE:-legacy}" \
+    --invalid-action-patience "${AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE:-0}" \
+    --attn-implementation "${VDA_FEEDBACK_ATTN_IMPLEMENTATION}" \
     --top-p "${AGZ_VDA_FEEDBACK_TOP_P:-1.0}" \
     --top-k "${AGZ_VDA_FEEDBACK_TOP_K:-0}" \
     > "${ROOT}/logs/${RUN_NAME}_vda_feedback_${index}.log" 2>&1 &
@@ -169,6 +173,7 @@ export AGZ_VDA_FEEDBACK_TIMEOUT=${AGZ_VDA_FEEDBACK_TIMEOUT:-1800}
 
 echo "DCA GPU layout=${DCA_GPU_LAYOUT} GPUs=${DCA_GPUS}; VDA feedback GPUs=${DCA_GPUS}"
 echo "DCA feedback services=${AGZ_VDA_FEEDBACK_URLS}"
+echo "DCA feedback attention=${VDA_FEEDBACK_ATTN_IMPLEMENTATION}"
 echo "DCA parent VDA adapter=${VDA_ADAPTER_PATH:-base}"
 echo "DCA resume_mode=${RESUME_MODE} resume_from_path=${RESUME_FROM_PATH} target_steps=${MAX_STEPS}"
 

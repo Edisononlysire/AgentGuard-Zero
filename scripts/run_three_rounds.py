@@ -11,6 +11,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agentguard_zero.variants import TRAINING_VARIANTS
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone", choices=["qwen3.5-4b", "qwen3.5-9b"], required=True)
     parser.add_argument(
         "--experiment-variant",
-        choices=["full", "append_only_memory"],
+        choices=TRAINING_VARIANTS,
         default="full",
     )
     parser.add_argument("--model-path", default="")

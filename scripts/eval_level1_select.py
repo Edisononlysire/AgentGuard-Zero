@@ -43,7 +43,12 @@ ACTIVE_PROBE_ACTIONS = {"SourceChallenge", "CanaryProbe", "DecoyProbe", "ShadowA
 VERIFY_TOOLS = PASSIVE_VERIFY_TOOLS | ACTIVE_PROBE_TOOLS
 HIGH_IMPACT_ACTIONS = {"Isolate", "Restore", "Remove"}
 LOW_IMPACT_MITIGATION = {"DeployDecoy", "ShadowBlock", "LimitSession"}
-V5_SELECTOR_MODES = {"v5_a_constrained", "v5_b_belief_q", "v5_c_frontier_minimax"}
+V5_SELECTOR_MODES = {
+    "v5_a_constrained",
+    "v5_b_belief_q",
+    "v5_c_frontier_minimax",
+    "v5_c_evidence_governor",
+}
 ADVANCED_SELECTOR_MODES = {"mitigation_v2", "mitigation_v3", "mitigation_v4"} | V5_SELECTOR_MODES
 HIDDEN_KEYS = {
     "oracle",
@@ -60,6 +65,15 @@ HIDDEN_KEYS = {
     "hidden",
     "hidden_state",
     "compromised_assets",
+    "source_assurance_level",
+    "scenario_id",
+    "scenario_family",
+    "pair_id",
+    "prefix_hash",
+    "trajectory_type",
+    "task_id",
+    "task_focus",
+    "metadata",
 }
 
 
@@ -828,7 +842,7 @@ def late_mitigation_governor(public_context: Any, candidates: list[Candidate], s
         )
     elif selector_mode == "v5_b_belief_q":
         early_ready = bool(turn >= 1.0 and risk >= 0.35 and confidence >= 0.60 and uncertainty <= 0.70)
-    elif selector_mode == "v5_c_frontier_minimax":
+    elif selector_mode in {"v5_c_frontier_minimax", "v5_c_evidence_governor"}:
         early_ready = bool(
             turn >= 1.0
             and verification_spent >= 1.0

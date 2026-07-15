@@ -897,8 +897,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
+            calculate_entropy = float(self.config.actor.entropy_coeff) != 0.0
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                output, entropys = self.actor.compute_log_prob(
+                    data=data,
+                    calculate_entropy=calculate_entropy,
+                )
+            if entropys is None:
+                # PPO uses entropy only when entropy_coeff is nonzero. Keep the
+                # diagnostics tensor shape without materializing full-vocab
+                # entropy logits for the zero-coefficient case.
+                entropys = torch.zeros_like(output)
             output = DataProto.from_dict(
                 tensors={"old_log_probs": output, "entropys": entropys},
                 meta_info={"temperature": self.config.rollout.temperature},

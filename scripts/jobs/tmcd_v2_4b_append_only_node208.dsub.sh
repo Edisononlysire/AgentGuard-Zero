@@ -3,11 +3,15 @@
 #DSUB -N 1
 #DSUB -A root.project.P24Z28400N0259_tmp2
 #DSUB -R "cpu=64;gpu=4;mem=230000"
-#DSUB -oo /home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero/logs/tmcd_v2/%J.out
-#DSUB -eo /home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero/logs/tmcd_v2/%J.err
+#DSUB -oo logs/tmcd_v2/%J.out
+#DSUB -eo logs/tmcd_v2/%J.err
 
 set -euo pipefail
-ROOT=/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero
+ROOT="${AGZ_ROOT:-${PWD}}"
+if [[ ! -d "${ROOT}/agentguard_zero" ]]; then
+  echo "Set AGZ_ROOT to the AgentGuard-Zero repository root" >&2
+  exit 71
+fi
 EXPECTED_NODE=cyclone001-agent-208
 if [[ "$(hostname)" != "${EXPECTED_NODE}" ]]; then
   echo "Refusing to run outside ${EXPECTED_NODE}: $(hostname)" >&2

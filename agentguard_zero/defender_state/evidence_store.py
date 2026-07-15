@@ -25,6 +25,30 @@ def _claim_identity(claim: Any) -> str:
     return json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+def _public_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Project an internal evidence record into a compact decision view."""
+    payload = copy.deepcopy(record.get("public_payload", {}))
+    if not isinstance(payload, dict):
+        payload = {"value": payload}
+    for key in ("event_id", "source", "source_id", "time", "type"):
+        payload.pop(key, None)
+
+    projected = {
+        "evidence_id": str(record.get("evidence_id", "")),
+        "event_id": str(record.get("event_id", "")),
+        "source_id": str(record.get("source_id", "unknown")),
+        "evidence_type": str(record.get("evidence_type", "event")),
+        "content": payload,
+    }
+    parents = copy.deepcopy(record.get("parent_evidence_ids", []))
+    if parents:
+        projected["parent_evidence_ids"] = parents
+    roots = copy.deepcopy(record.get("root_source_ids", []))
+    if roots and roots != [projected["source_id"]]:
+        projected["root_source_ids"] = roots
+    return projected
+
+
 class EvidenceStore:
     """Public evidence ledger with availability time and minimal provenance lineage."""
 
@@ -69,13 +93,19 @@ class EvidenceStore:
         parents = sorted({str(item) for item in parent_evidence_ids if str(item) in self._records})
         tool = str(public_result.get("tool", "Tool"))
         source_id = str(public_result.get("verifier_id") or f"tool:{tool}")
-        roots = {source_id}
+        roots = {
+            str(item)
+            for item in public_result.get("root_source_ids", []) or []
+            if str(item)
+        }
         claim_keys = {
             _claim_identity(public_result.get("claim_semantics"))
         } - {""}
         for parent in parents:
             roots.update(str(item) for item in self._records[parent].get("root_source_ids", []))
             claim_keys.update(str(item) for item in self._records[parent].get("claim_keys", []))
+        if not roots:
+            roots.add(source_id)
         evidence_id = _stable_id(
             "tool",
             {"tool": tool, "time": time, "parents": parents, "payload": public_result},
@@ -118,16 +148,39 @@ class EvidenceStore:
         return True, "ok"
 
     def independent_count(self, evidence_ids: Iterable[str], *, time: int) -> int:
-        """Count evidence records whose provenance roots are pairwise disjoint."""
-        selected_roots: set[str] = set()
-        count = 0
-        records = [self.get(item, time=time) for item in sorted(set(evidence_ids or []))]
-        for record in (item for item in records if item is not None):
-            roots = set(str(item) for item in record.get("root_source_ids", []))
-            if roots and roots.isdisjoint(selected_roots):
-                selected_roots.update(roots)
-                count += 1
-        return count
+        """Return the maximum number of records with pairwise-disjoint roots."""
+
+        records = [self.get(item, time=time) for item in set(evidence_ids or [])]
+        root_sets = [
+            frozenset(str(root) for root in record.get("root_source_ids", []) if str(root))
+            for record in records
+            if record is not None
+        ]
+        root_sets = [roots for roots in root_sets if roots]
+        best = 0
+
+        def search(index: int, used: frozenset[str], count: int) -> None:
+            nonlocal best
+            if count + len(root_sets) - index <= best:
+                return
+            if index >= len(root_sets):
+                best = max(best, count)
+                return
+            roots = root_sets[index]
+            if roots.isdisjoint(used):
+                search(index + 1, used | roots, count + 1)
+            search(index + 1, used, count)
+
+        search(0, frozenset(), 0)
+        return best
+
+    def root_sources(self, evidence_ids: Iterable[str], *, time: int) -> list[str]:
+        roots: set[str] = set()
+        for evidence_id in set(evidence_ids or []):
+            record = self.get(str(evidence_id), time=time)
+            if record is not None:
+                roots.update(str(item) for item in record.get("root_source_ids", []) if str(item))
+        return sorted(roots)
 
     def refs_support_claim(
         self,
@@ -159,7 +212,15 @@ class EvidenceStore:
         ]
 
     def public_snapshot(self, *, time: int, limit: int = 32) -> list[dict[str, Any]]:
-        rows = self.available_records(time=time)[-max(1, int(limit)) :]
+        records = sorted(
+            self.available_records(time=time),
+            key=lambda row: (
+                int(row.get("available_at", 0)),
+                int(row.get("created_at", 0)),
+                str(row.get("evidence_id", "")),
+            ),
+        )
+        rows = [_public_record(row) for row in records[-max(1, int(limit)) :]]
         for row in rows:
             assert_public(row)
         return rows

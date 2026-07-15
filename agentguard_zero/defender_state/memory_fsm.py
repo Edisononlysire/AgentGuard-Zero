@@ -94,14 +94,27 @@ class EvidenceStateMemory:
                     continue
                 claim_key = canonical_claim_key(claim)
                 memory_id = self.claim_index.get(claim_key, self._memory_id(claim_key))
+                derived_source_ids = evidence_store.root_sources(refs, time=time)
+                declared_source_ids = sorted(
+                    {str(item) for item in operation.get("source_ids", []) if str(item)}
+                )
+                if declared_source_ids and declared_source_ids != derived_source_ids:
+                    results.append(
+                        {
+                            "committed": False,
+                            "op": op,
+                            "reason": "source_lineage_mismatch",
+                            "derived_source_ids": derived_source_ids,
+                        }
+                    )
+                    continue
                 if memory_id not in self.records:
-                    source_ids = sorted({str(item) for item in operation.get("source_ids", []) if str(item)})
                     self.records[memory_id] = {
                         "memory_id": memory_id,
                         "claim_key": claim_key,
                         "claim": claim,
                         "entity_id": str(claim.get("entity_id", "")),
-                        "source_ids": source_ids,
+                        "source_ids": derived_source_ids,
                         "status": "quarantined",
                         "confidence": 0.5,
                         "created_at": int(time),
@@ -112,6 +125,7 @@ class EvidenceStateMemory:
                         "contradiction_refs": [],
                         "retrieval_count": 0,
                         "acceptance_count": 0,
+                        "usage_counts": {"support": 0, "contradict": 0, "background": 0},
                         "last_retrieved_at": None,
                         "last_used_for_action": None,
                         "transition_history": [
@@ -220,22 +234,29 @@ class EvidenceStateMemory:
             if memory_id not in retrieved_ids or memory_id not in self.records:
                 continue
             record = self.records[memory_id]
-            record["acceptance_count"] = int(record.get("acceptance_count", 0)) + 1
+            role = str(item.get("usage", "background"))
+            used_for = str(item.get("used_for", "belief"))
+            usage_counts = record.setdefault(
+                "usage_counts", {"support": 0, "contradict": 0, "background": 0}
+            )
+            usage_counts[role] = int(usage_counts.get(role, 0)) + 1
+            is_acceptance = role == "support" and used_for in {"belief", "response"}
+            if is_acceptance:
+                record["acceptance_count"] = int(record.get("acceptance_count", 0)) + 1
             record["last_used_for_action"] = {
                 "time": int(time),
-                "usage": str(item.get("usage", "background")),
-                "used_for": str(item.get("used_for", "belief")),
+                "usage": role,
+                "used_for": used_for,
             }
-            accepted.append(memory_id)
+            if is_acceptance:
+                accepted.append(memory_id)
         return accepted
 
     def public_record(self, memory_id: str) -> dict[str, Any]:
         record = self.records[memory_id]
         keys = (
             "memory_id",
-            "claim_key",
             "claim",
-            "entity_id",
             "source_ids",
             "status",
             "confidence",

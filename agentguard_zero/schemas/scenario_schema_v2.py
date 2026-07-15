@@ -268,6 +268,16 @@ def validate_scenario_v2(scenario: dict[str, Any]) -> tuple[bool, str]:
         return False, "invalid_attack_phase"
     if scenario.get("split") in {"train", "dev", "xplay"} and scenario.get("scenario_family") in OOD_FAMILIES:
         return False, "ood_family_in_training_split"
+    if scenario.get("scenario_family") == "trust_betrayal":
+        if not str(scenario.get("pair_id", "")).strip():
+            return False, "missing_pair_id"
+        divergence = scenario.get("divergence_time")
+        if isinstance(divergence, bool) or not isinstance(divergence, int) or divergence < 0:
+            return False, "invalid_divergence_time"
+        if scenario.get("trajectory_type") not in {"betrayal", "legitimate_change"}:
+            return False, "invalid_trajectory_type"
+        if not str(scenario.get("prefix_hash", "")).strip():
+            return False, "missing_prefix_hash"
     source_ids: set[str] = set()
     for profile in scenario.get("source_profiles", []):
         source_id = str(profile.get("source_id", ""))
@@ -288,6 +298,9 @@ def validate_scenario_v2(scenario: dict[str, Any]) -> tuple[bool, str]:
         if not event_id or event_id in event_ids:
             return False, "invalid_or_duplicate_event"
         event_ids.add(event_id)
+        event_time = event.get("time", -1)
+        if isinstance(event_time, bool) or not isinstance(event_time, int) or event_time < 0:
+            return False, "invalid_event_time"
         if str(event.get("source_id", "")) not in source_ids:
             return False, "event_source_not_profiled"
         semantics = event.get("claim_semantics", {})

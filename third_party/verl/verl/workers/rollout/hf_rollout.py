@@ -19,6 +19,7 @@ to perform generation.
 """
 
 import contextlib
+import math
 
 import torch
 import torch.distributed
@@ -35,6 +36,28 @@ from verl.utils.torch_functional import get_response_mask
 from .base import BaseRollout
 
 __all__ = ["HFRollout"]
+
+
+def _rollout_chunk_plan(
+    batch_size: int,
+    sequence_tokens: int,
+    max_num_seqs: int | None,
+    max_batch_tokens: int | None,
+) -> tuple[int, int]:
+    """Return (chunk count, largest chunk) under example and token limits."""
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    chunk_limit = batch_size
+    if max_num_seqs is not None and int(max_num_seqs) > 0:
+        chunk_limit = min(chunk_limit, int(max_num_seqs))
+    if max_batch_tokens is not None and int(max_batch_tokens) > 0:
+        token_limit = max(1, int(max_batch_tokens) // max(1, int(sequence_tokens)))
+        chunk_limit = min(chunk_limit, token_limit)
+
+    num_chunks = math.ceil(batch_size / max(1, chunk_limit))
+    largest_chunk = math.ceil(batch_size / num_chunks)
+    return num_chunks, largest_chunk
 
 
 class HFRollout(BaseRollout):
@@ -120,7 +143,19 @@ class HFRollout(BaseRollout):
 
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         batch_size = prompts.batch.batch_size[0]
-        num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
+        response_length = prompts.meta_info.get(
+            "response_length", self.config.get("response_length", 0)
+        )
+        sequence_tokens = prompts.batch["input_ids"].size(1) + int(response_length)
+        max_num_seqs = self.config.get(
+            "max_num_seqs", self.config.get("micro_batch_size", batch_size)
+        )
+        num_chunks, _ = _rollout_chunk_plan(
+            batch_size=batch_size,
+            sequence_tokens=sequence_tokens,
+            max_num_seqs=max_num_seqs,
+            max_batch_tokens=self.config.get("hf_max_batch_tokens", None),
+        )
         batch_prompts = prompts.chunk(chunks=num_chunks)
         output = [self._generate_minibatch(p) for p in batch_prompts]
         output = DataProto.concat(output)

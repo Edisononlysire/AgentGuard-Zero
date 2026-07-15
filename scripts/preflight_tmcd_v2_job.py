@@ -16,7 +16,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agentguard_zero.training.coevolution import atomic_write_json, model_identity, sha256_file, utc_now
+from agentguard_zero.training.coevolution import (
+    atomic_write_json,
+    model_identity,
+    sha256_file,
+    sha256_source_tree,
+    utc_now,
+)
+from agentguard_zero.protocol import TMCD_PROTOCOL_VERSION, TMCD_RELEASE_REVISION
+from agentguard_zero.variants import TRAINING_VARIANTS
 
 
 def _run(command: list[str], *, cwd: Path = ROOT) -> str:
@@ -35,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backbone", choices=["qwen3.5-4b", "qwen3.5-9b"], required=True)
     parser.add_argument("--model-path", required=True)
-    parser.add_argument("--variant", choices=["full", "append_only_memory"], required=True)
+    parser.add_argument("--variant", choices=TRAINING_VARIANTS, required=True)
     parser.add_argument("--expected-node", required=True)
     parser.add_argument("--output", required=True)
     return parser.parse_args()
@@ -67,9 +75,20 @@ def main() -> None:
         if not path.is_file():
             raise SystemExit(f"missing frozen manifest: {path}")
     protocol = json.loads((frozen / "protocol.json").read_text(encoding="utf-8"))
-    if protocol.get("protocol_version") != "tmcd-v2":
+    if protocol.get("protocol_version") != TMCD_PROTOCOL_VERSION:
         raise SystemExit("frozen protocol version mismatch")
+    if protocol.get("release_revision") != TMCD_RELEASE_REVISION:
+        raise SystemExit("frozen protocol release revision mismatch")
     source_freeze = json.loads((frozen / "source_freeze.json").read_text(encoding="utf-8"))
+    source_trees = source_freeze.get("source_trees", {})
+    if not source_trees:
+        raise SystemExit("source freeze does not record source tree hashes")
+    for relative_path, expected_sha256 in source_trees.items():
+        source_path = ROOT / relative_path
+        if not source_path.is_dir():
+            raise SystemExit(f"missing frozen source tree: {source_path}")
+        if sha256_source_tree(source_path) != expected_sha256:
+            raise SystemExit(f"source tree hash mismatch: {source_path}")
     framework_files = source_freeze.get("training_framework", {})
     if not framework_files:
         raise SystemExit("source freeze does not record the training framework")
@@ -108,7 +127,8 @@ def main() -> None:
         ]
     )
     report = {
-        "protocol_version": "tmcd-v2",
+        "protocol_version": TMCD_PROTOCOL_VERSION,
+        "release_revision": TMCD_RELEASE_REVISION,
         "kind": "job_preflight",
         "created_at": utc_now(),
         "host": host,
@@ -121,6 +141,7 @@ def main() -> None:
         "model": model_identity(model_path),
         "protocol_manifest_sha256": sha256_file(frozen / "protocol.json"),
         "source_freeze_sha256": sha256_file(frozen / "source_freeze.json"),
+        "source_tree_hashes": source_trees,
         "unit_tests": "passed",
         "unit_test_output_tail": test_output.splitlines()[-5:],
         "training_framework_import": framework_import.splitlines()[-5:],

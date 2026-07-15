@@ -6,13 +6,15 @@ Cyber Defense under Trust Deception and Profile Poisoning**.
 AgentGuard-Zero studies autonomous defensive decision-making when observations,
 source trust, and long-term profile memory may be manipulated. It contains an
 abstract safety-bounded simulator, a Deception Curriculum Agent (DCA), a
-Verification Defense Agent (VDA), the frozen-parameter V5-C selector, and the
+Verification Defense Agent (VDA), the frozen-parameter V5-C Evidence-Constrained
+Runtime Governor, and the
 strict DCA-first alternating co-evolution pipeline used by the paper.
 
 The repository intentionally excludes model weights, LoRA checkpoints,
-generated datasets, API credentials, cluster launchers, logs, and paper result
-artifacts. It contains the method and experiment code needed to inspect and
-reproduce the pipeline with separately obtained models and compute.
+generated datasets, API credentials, site-specific scheduler outputs, logs, and
+paper result artifacts. It contains the method, example launchers, and
+experiment code needed to inspect and reproduce the pipeline with separately
+obtained models and compute.
 
 ## Method At A Glance
 
@@ -21,7 +23,7 @@ DCA_r proposes 4,000 scenarios
   -> VDA_r rollout feedback
   -> train independent DCA_{r+1} LoRA
   -> DCA_{r+1} generates 10,000 new candidates
-  -> safety + validity + solvability + CFC/frontier filtering
+  -> safety + validity + solvability + security-CFC curriculum filtering
   -> train/dev/xplay = 2,400/400/800
   -> train independent VDA_{r+1} LoRA
 ```
@@ -29,9 +31,15 @@ DCA_r proposes 4,000 scenarios
 The process runs for three rounds independently on Qwen3.5-4B and Qwen3.5-9B.
 DCA and VDA share a frozen backbone architecture but never share adapters.
 Every batch and checkpoint is hashed, role-labelled, and linked to its parent.
+The DCA update is conditioned on current-VDA rollout feedback. The fresh VDA
+pool is then selected with safety, consistency, oracle-solvability, uniqueness,
+and security-CFC checks. This pool filter is not described as a direct
+multi-rollout current-VDA frontier estimator.
 
 VDA can use passive verification and four defensive active probes:
 `SourceChallenge`, `CanaryProbe`, `DecoyProbe`, and `ShadowActionProbe`. These
+return seeded, noisy qualitative evidence rather than hidden truth. DecoyProbe
+also changes the next public observation through an explicit probe state. These
 are abstract, low-risk simulator actions; the project does not generate attack
 payloads, exploit real systems, or execute network attacks.
 
@@ -43,7 +51,7 @@ payloads, exploit real systems, or execute network attacks.
 | `scripts/run_dca_first_round.py` | authoritative resumable one-round pipeline |
 | `scripts/run_three_rounds.py` | serial three-round launcher for one backbone |
 | `scripts/eval_tmcd_systems.py` | baselines, Train, Select, and Train+V5-C evaluation |
-| `scripts/eval_level1_select.py` | public-state V5-C selector |
+| `agentguard_zero/governance/v5c.py` | V5-C hard admission and public-state robust ranking |
 | `curriculum/reward_function/` | online DCA and trajectory VDA rewards |
 | `docs/` | protocol and V5-C method details |
 | `third_party/` | patched VerL and Verl-Tool runtime subset |
@@ -127,20 +135,26 @@ cybersecurity-LLM, trained VDA, Select, and Train+V5-C systems. For example:
 ```bash
 python scripts/run_tmcd_eval_four_gpu.py \
   --data /path/to/TMCD-Test-Mix.parquet \
-  --system agentguard_zero_train \
+  --system agentguard_zero_full \
   --model-path "$AGZ_QWEN35_4B_PATH" \
   --adapter-path /path/to/checkpoints/qwen3.5-4b/vda/round_3/adapter \
-  --run-name qwen35_4b_train
+  --run-name qwen35_4b_full
 ```
 
 Use `python scripts/eval_tmcd_systems.py --help` for all system identifiers and
 backend options. API credentials are read only from the environment variable
 named by `--api_key_env`; no credential value is written to source code.
+The evaluation-only controls `agentguard_zero_train_random_k`,
+`agentguard_zero_train_generic_best_of_k`, and
+`agentguard_zero_train_soft_v5c` reuse the same trained adapter and candidate
+count; they do not require additional co-evolution training.
 
 ## Reproducibility Contract
 
 - DCA feedback data never enters VDA train/dev/xplay.
 - A VDA pool must cite the newly updated DCA checkpoint.
+- Every formal artifact must match the active TMCD release revision; legacy
+  DCA feedback, checkpoints, candidate pools, and splits fail closed.
 - DCA and VDA adapters have distinct paths and SHA-256 hashes.
 - Selector calibration uses train and dev only.
 - Final-heldout, TMCD-Test-Mix, and CAGE-style data are test-only.
