@@ -115,6 +115,7 @@ DYNAMIC_BSZ=${AGZ_DYNAMIC_BSZ:-false}
 RESHARD_AFTER_FORWARD=${AGZ_RESHARD_AFTER_FORWARD:-false}
 HF_FULL_ROLLOUT_REPLICA=${AGZ_HF_FULL_ROLLOUT_REPLICA:-true}
 STOP_ON_COMPLETE_JSON=${AGZ_STOP_ON_COMPLETE_JSON:-true}
+ENABLE_GRADIENT_CHECKPOINTING=${AGZ_ENABLE_GRADIENT_CHECKPOINTING:-true}
 
 export CUDA_VISIBLE_DEVICES
 export VERL_RUN_ID="${RUN_NAME}"
@@ -145,6 +146,7 @@ echo "Using LoRA rank=${LORA_RANK}"
 echo "Using LoRA alpha=${LORA_ALPHA}"
 echo "Using LoRA target_modules=${LORA_TARGET_MODULES}"
 echo "Using torch compile=${USE_TORCH_COMPILE}"
+echo "Using gradient checkpointing=${ENABLE_GRADIENT_CHECKPOINTING}"
 echo "Using agent num_workers=${AGENT_NUM_WORKERS}"
 echo "Using tool server mode=${TOOL_SERVER_MODE}"
 echo "Using agent max_turns=${AGENT_MAX_TURNS}"
@@ -273,7 +275,7 @@ PYTHONUNBUFFERED=1 python -s -m verl_tool.trainer.main_ppo \
     custom_reward_function.path="${ROOT}/curriculum/reward_function/vda_reward.py" \
     custom_reward_function.name=compute_score \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.model.enable_gradient_checkpointing="${ENABLE_GRADIENT_CHECKPOINTING}" \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \

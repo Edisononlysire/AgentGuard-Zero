@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import sys
+import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -20,6 +21,11 @@ from agentguard_zero.env.checker import full_check, parse_scenario_json
 from agentguard_zero.rewards.dca_reward import compute_dca_reward
 from agentguard_zero.schemas.scenario_schema_v2 import public_prefix_hash
 from agentguard_zero.training.coevolution import scenario_fingerprint, utc_now
+
+
+_FINGERPRINT_CACHE_LOCK = threading.Lock()
+_FINGERPRINT_CACHE: dict[str, tuple[int, int, set[str]]] = {}
+_APPEND_COUNTS: dict[str, int] = {}
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -115,16 +121,34 @@ def _evaluate_batch(
 def _existing_fingerprints(path: Path) -> set[str]:
     if not path.exists():
         return set()
-    values: set[str] = set()
     with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            fingerprint = value.get("scenario_fingerprint") if isinstance(value, dict) else None
-            if fingerprint:
-                values.add(str(fingerprint))
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        try:
+            stat = os.fstat(handle.fileno())
+            signature = (stat.st_size, stat.st_mtime_ns)
+            key = str(path)
+            with _FINGERPRINT_CACHE_LOCK:
+                cached = _FINGERPRINT_CACHE.get(key)
+                if cached and cached[:2] == signature:
+                    return set(cached[2])
+
+            values: set[str] = set()
+            for line in handle:
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                fingerprint = (
+                    value.get("scenario_fingerprint")
+                    if isinstance(value, dict)
+                    else None
+                )
+                if fingerprint:
+                    values.add(str(fingerprint))
+            with _FINGERPRINT_CACHE_LOCK:
+                _FINGERPRINT_CACHE[key] = (*signature, set(values))
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     return values
 
 
@@ -148,10 +172,43 @@ def _append_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
+            key = str(path)
+            before = os.fstat(handle.fileno())
+            before_signature = (before.st_size, before.st_mtime_ns)
+            with _FINGERPRINT_CACHE_LOCK:
+                cached = _FINGERPRINT_CACHE.get(key)
+                cached_values = (
+                    set(cached[2])
+                    if cached and cached[:2] == before_signature
+                    else None
+                )
             for row in rows:
                 handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
             handle.flush()
-            os.fsync(handle.fileno())
+            with _FINGERPRINT_CACHE_LOCK:
+                append_count = _APPEND_COUNTS.get(key, 0) + 1
+                _APPEND_COUNTS[key] = append_count
+            fsync_interval = max(
+                1, int(os.environ.get("AGZ_DCA_REWARD_FSYNC_EVERY_BATCHES", "1"))
+            )
+            if append_count % fsync_interval == 0:
+                os.fsync(handle.fileno())
+
+            after = os.fstat(handle.fileno())
+            with _FINGERPRINT_CACHE_LOCK:
+                if cached_values is None:
+                    _FINGERPRINT_CACHE.pop(key, None)
+                else:
+                    cached_values.update(
+                        str(row.get("scenario_fingerprint"))
+                        for row in rows
+                        if row.get("scenario_fingerprint")
+                    )
+                    _FINGERPRINT_CACHE[key] = (
+                        after.st_size,
+                        after.st_mtime_ns,
+                        cached_values,
+                    )
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 

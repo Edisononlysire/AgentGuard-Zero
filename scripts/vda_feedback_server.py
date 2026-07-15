@@ -139,10 +139,19 @@ def _generation_messages(state: dict[str, Any]) -> list[dict[str, str]]:
         if state["continuation_prompt_mode"] == "snapshot"
         else initial_messages
     )
+    history_window = max(0, int(state.get("history_window", 0)))
+    history = (
+        state["history"][-history_window:]
+        if history_window
+        else state["history"]
+    )
     continuation = {
-        "history": state["history"],
+        "history": history,
         "current_public_state": state["public_context"],
     }
+    if history_window:
+        continuation["history_steps_total"] = len(state["history"])
+        continuation["history_truncated"] = len(history) < len(state["history"])
     return base_messages + [
         {
             "role": "user",
@@ -335,6 +344,7 @@ class FeedbackEngine:
                     "initial_messages": messages,
                     "instruction_messages": instruction_messages,
                     "continuation_prompt_mode": self.args.continuation_prompt_mode,
+                    "history_window": self.args.history_window,
                     "public_context": public_context,
                     "history": [],
                     "extra": extra,
@@ -524,6 +534,7 @@ class FeedbackEngine:
                     "event": "feedback_batch",
                     "attention": self.args.attn_implementation,
                     "continuation_prompt_mode": self.args.continuation_prompt_mode,
+                    "history_window": self.args.history_window,
                     "invalid_action_patience": self.args.invalid_action_patience,
                     "scenarios": len(scenarios),
                     "rollouts": len(solvable_indices),
@@ -622,6 +633,12 @@ def parse_args() -> argparse.Namespace:
         choices=["legacy", "snapshot"],
         default="legacy",
     )
+    parser.add_argument(
+        "--history-window",
+        type=int,
+        default=int(os.environ.get("AGZ_VDA_FEEDBACK_HISTORY_WINDOW", "0")),
+        help="Keep only the latest N compact history summaries; 0 preserves full history.",
+    )
     parser.add_argument("--invalid-action-patience", type=int, default=0)
     parser.add_argument(
         "--stop-on-complete-json",
@@ -647,6 +664,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.invalid_action_patience < 0:
         parser.error("--invalid-action-patience must be non-negative")
+    if args.history_window < 0:
+        parser.error("--history-window must be non-negative")
 
     # Namespace fields shared with scripts/eval_level1_select.py.
     args.model_path = args.model_path

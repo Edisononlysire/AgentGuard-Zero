@@ -585,6 +585,11 @@ def main() -> None:
                     }
                 )
                 _run(["/usr/bin/bash", str(root / "scripts" / "train_dca_qwen35_lora.sh")], env=environment)
+                # Reward logging may batch fsync calls for shared-filesystem
+                # throughput. Make the completed feedback pool durable before
+                # reading it or hashing its lineage manifest.
+                with feedback_log_path.open("rb") as handle:
+                    os.fsync(handle.fileno())
 
             feedback_rows = read_jsonl(feedback_log_path)
             if len(feedback_rows) < args.dca_feedback_candidates:
@@ -660,6 +665,16 @@ def main() -> None:
                     "ppo_micro_batch_size_per_gpu": int(
                         os.environ.get("AGZ_DCA_PPO_MICRO_BATCH_SIZE_PER_GPU", "4")
                     ),
+                    "log_prob_micro_batch_size_per_gpu": int(
+                        os.environ.get("AGZ_DCA_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU", "4")
+                    ),
+                    "save_freq": dca_round_steps,
+                    "max_actor_ckpt_to_keep": int(
+                        os.environ.get("AGZ_MAX_ACTOR_CKPT_TO_KEEP", "1")
+                    ),
+                    "reward_fsync_every_batches": int(
+                        os.environ.get("AGZ_DCA_REWARD_FSYNC_EVERY_BATCHES", "1")
+                    ),
                     "max_prompt_length": int(os.environ.get("AGZ_DCA_MAX_PROMPT_LENGTH", 2048)),
                     "max_response_length": int(os.environ.get("AGZ_DCA_MAX_RESPONSE_LENGTH", 1024)),
                     "rollout_temperature": float(os.environ.get("AGZ_ROLLOUT_TEMPERATURE", 0.7)),
@@ -674,6 +689,9 @@ def main() -> None:
                     "vda_feedback_continuation_prompt_mode": os.environ.get(
                         "AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE", "legacy"
                     ),
+                    "vda_feedback_history_window": int(
+                        os.environ.get("AGZ_VDA_FEEDBACK_HISTORY_WINDOW", "0")
+                    ),
                     "vda_feedback_invalid_action_patience": int(
                         os.environ.get("AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE", 0)
                     ),
@@ -681,6 +699,12 @@ def main() -> None:
                     "lora_alpha": 32,
                     "learning_rate": 2e-5,
                     "activation_offload": False,
+                    "gradient_checkpointing": (
+                        os.environ.get("AGZ_ENABLE_GRADIENT_CHECKPOINTING", "true")
+                        .strip()
+                        .lower()
+                        in {"1", "true", "yes", "on"}
+                    ),
                     "seed": args.seed,
                 },
             )
@@ -806,7 +830,7 @@ def main() -> None:
                             ),
                             "--partial-fsync-every-batches",
                             os.environ.get(
-                                "AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES", "1"
+                                "AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES", "16"
                             ),
                             "--max-attempts",
                             str(candidate_max_attempts),
@@ -1021,12 +1045,23 @@ def main() -> None:
                         "AGZ_MAX_MODEL_LENGTH": str(vda_model_tokens),
                         "AGZ_MAX_ACTION_LENGTH": str(vda_action_tokens),
                         "AGZ_MAX_OBS_LENGTH": str(vda_observation_tokens),
-                        "AGZ_GPU_MEMORY_UTILIZATION": "0.35",
+                        "AGZ_GPU_MEMORY_UTILIZATION": os.environ.get(
+                            "AGZ_GPU_MEMORY_UTILIZATION", "0.35"
+                        ),
                         "AGZ_MAX_NUM_SEQS": (
                             os.environ.get(
-                                "AGZ_VDA_MAX_NUM_SEQS",
-                                "8" if args.backbone == "qwen3.5-4b" else "4",
+                                "AGZ_MAX_NUM_SEQS",
+                                os.environ.get(
+                                    "AGZ_VDA_MAX_NUM_SEQS",
+                                    "8" if args.backbone == "qwen3.5-4b" else "4",
+                                ),
                             )
+                        ),
+                        "AGZ_AGENT_NUM_WORKERS": os.environ.get(
+                            "AGZ_AGENT_NUM_WORKERS", "1"
+                        ),
+                        "AGZ_ROLLOUT_BACKEND": os.environ.get(
+                            "AGZ_ROLLOUT_BACKEND", "hf"
                         ),
                         "AGZ_LORA_RANK": "16",
                         "AGZ_LORA_ALPHA": "32",
@@ -1090,7 +1125,7 @@ def main() -> None:
                     ),
                     "candidate_partial_fsync_every_batches": int(
                         os.environ.get(
-                            "AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES", "1"
+                            "AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES", "16"
                         )
                     ),
                     "train_size": args.vda_train_size,
@@ -1116,6 +1151,39 @@ def main() -> None:
                         os.environ.get(
                             "AGZ_VDA_PPO_MICRO_BATCH_SIZE_PER_GPU", "2"
                         )
+                    ),
+                    "log_prob_micro_batch_size_per_gpu": int(
+                        os.environ.get(
+                            "AGZ_VDA_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU", "2"
+                        )
+                    ),
+                    "rollout_backend": os.environ.get("AGZ_ROLLOUT_BACKEND", "hf"),
+                    "agent_num_workers": int(
+                        os.environ.get("AGZ_AGENT_NUM_WORKERS", "1")
+                    ),
+                    "gpu_memory_utilization": float(
+                        os.environ.get("AGZ_GPU_MEMORY_UTILIZATION", "0.35")
+                    ),
+                    "max_num_seqs": int(
+                        os.environ.get(
+                            "AGZ_MAX_NUM_SEQS",
+                            os.environ.get(
+                                "AGZ_VDA_MAX_NUM_SEQS",
+                                "8" if args.backbone == "qwen3.5-4b" else "4",
+                            ),
+                        )
+                    ),
+                    "save_freq": int(
+                        os.environ.get("AGZ_VDA_SAVE_FREQ", str(vda_round_steps))
+                    ),
+                    "max_actor_ckpt_to_keep": int(
+                        os.environ.get("AGZ_MAX_ACTOR_CKPT_TO_KEEP", "1")
+                    ),
+                    "gradient_checkpointing": (
+                        os.environ.get("AGZ_ENABLE_GRADIENT_CHECKPOINTING", "true")
+                        .strip()
+                        .lower()
+                        in {"1", "true", "yes", "on"}
                     ),
                     "lora_rank": 16,
                     "lora_alpha": 32,

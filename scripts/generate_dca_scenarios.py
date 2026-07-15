@@ -252,7 +252,13 @@ def parse_args() -> argparse.Namespace:
         choices=["eager", "sdpa", "flash_attention_2"],
         default=os.environ.get("AGZ_DCA_GENERATION_ATTN_IMPLEMENTATION", "sdpa"),
     )
-    parser.add_argument("--partial-fsync-every-batches", type=int, default=1)
+    parser.add_argument(
+        "--partial-fsync-every-batches",
+        type=int,
+        default=int(
+            os.environ.get("AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES", "16")
+        ),
+    )
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--stop-on-complete-json", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)

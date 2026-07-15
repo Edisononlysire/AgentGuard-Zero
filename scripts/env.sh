@@ -6,6 +6,7 @@ export AGZ_ROOT=${AGZ_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}
 export PYTHONPATH="${AGZ_ROOT}:${AGZ_ROOT}/third_party:${AGZ_ROOT}/third_party/verl:${PYTHONPATH:-}"
 export HF_HOME=${HF_HOME:-${HOME}/.cache/huggingface}
 export AGZ_TRITON_CACHE_ROOT=${AGZ_TRITON_CACHE_ROOT:-${TMPDIR:-/tmp}/agentguard_zero_triton_${USER:-user}}
+export RAY_TMPDIR=${RAY_TMPDIR:-${TMPDIR:-/tmp}/agentguard_zero_ray_${USER:-user}}
 
 # Optional target-directory installs for platform-specific Qwen3.5 packages.
 # Prepending in this order yields causal-conv -> FLA -> Transformers precedence.
@@ -20,4 +21,4 @@ for variable_name in AGZ_TRANSFORMERS_OVERLAY AGZ_FLA_OVERLAY AGZ_CAUSAL_CONV_OV
   fi
 done
 
-mkdir -p "${HF_HOME}" "${AGZ_TRITON_CACHE_ROOT}" "${AGZ_ROOT}/logs"
+mkdir -p "${HF_HOME}" "${AGZ_TRITON_CACHE_ROOT}" "${RAY_TMPDIR}" "${AGZ_ROOT}/logs"

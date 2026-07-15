@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from agentguard_zero.defender_state.evidence_store import EvidenceStore
 from agentguard_zero.defender_state.memory_fsm import EvidenceStateMemory
@@ -75,6 +77,8 @@ from scripts.generate_dca_scenarios import (
 from scripts.merge_dca_candidate_shards import merge_candidate_shards
 from scripts.prune_gate_recovery_checkpoint import prune_gate_recovery
 from scripts.validate_vda_training_log import parse_training_metrics
+from scripts.vda_feedback_server import _generation_messages
+from curriculum.reward_function import dca_online_reward
 
 
 def _action(**updates):
@@ -1674,6 +1678,79 @@ class TMCDV2TeacherReviewTests(unittest.TestCase):
             SYSTEM_ALIASES["agentguard_zero_train_select"],
             "agentguard_zero_full",
         )
+
+
+class TMCDV2PerformanceReviewTests(unittest.TestCase):
+    def test_feedback_history_window_is_explicit_and_bounded(self) -> None:
+        state = {
+            "initial_messages": [{"role": "system", "content": "system"}],
+            "instruction_messages": [{"role": "system", "content": "system"}],
+            "continuation_prompt_mode": "snapshot",
+            "history": [{"t": index} for index in range(10)],
+            "history_window": 3,
+            "public_context": {"observation": {"time": 10}},
+        }
+        messages = _generation_messages(state)
+        content = messages[-1]["content"]
+        payload = json.loads(
+            content.split("Compact trajectory state (history is chronological):", 1)[1]
+            .split("\nReturn the next compact strict VDA JSON action only.", 1)[0]
+        )
+        self.assertEqual([item["t"] for item in payload["history"]], [7, 8, 9])
+        self.assertEqual(payload["history_steps_total"], 10)
+        self.assertTrue(payload["history_truncated"])
+
+        state["history_window"] = 0
+        full_content = _generation_messages(state)[-1]["content"]
+        full_payload = json.loads(
+            full_content.split("Compact trajectory state (history is chronological):", 1)[1]
+            .split("\nReturn the next compact strict VDA JSON action only.", 1)[0]
+        )
+        self.assertEqual(len(full_payload["history"]), 10)
+        self.assertNotIn("history_truncated", full_payload)
+        self.assertNotIn("history_steps_total", full_payload)
+
+    def test_reward_fingerprint_cache_detects_external_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "feedback.jsonl"
+            with mock.patch.dict(
+                os.environ,
+                {"AGZ_DCA_REWARD_FSYNC_EVERY_BATCHES": "8"},
+                clear=False,
+            ):
+                dca_online_reward._append_rows(
+                    path, [{"scenario_fingerprint": "fingerprint-a"}]
+                )
+            self.assertEqual(
+                dca_online_reward._existing_fingerprints(path),
+                {"fingerprint-a"},
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"scenario_fingerprint": "fingerprint-b"}) + "\n")
+            self.assertEqual(
+                dca_online_reward._existing_fingerprints(path),
+                {"fingerprint-a", "fingerprint-b"},
+            )
+
+    def test_formal_jobs_lock_low_risk_performance_controls(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for relative_path in (
+            "scripts/jobs/tmcd_v2_4b_full_node175.dsub.sh",
+            "scripts/jobs/tmcd_v2_4b_append_only_node208.dsub.sh",
+            "scripts/jobs/tmcd_v2_9b_full_node217.dsub.sh",
+        ):
+            source = (root / relative_path).read_text(encoding="utf-8")
+            self.assertLess(
+                source.index('source "${ROOT}/scripts/env.sh"'),
+                source.index("export AGZ_DCA_PPO_MICRO_BATCH_SIZE_PER_GPU=1"),
+            )
+            self.assertIn(
+                "export AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES=16",
+                source,
+            )
+            self.assertIn("export AGZ_DCA_REWARD_FSYNC_EVERY_BATCHES=8", source)
+            self.assertIn("env | grep '^AGZ_'", source)
+            self.assertIn("=<redacted>", source)
 
 if __name__ == "__main__":
     unittest.main()

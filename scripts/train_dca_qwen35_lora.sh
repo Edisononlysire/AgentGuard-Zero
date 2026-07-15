@@ -82,6 +82,7 @@ DYNAMIC_BSZ=${AGZ_DYNAMIC_BSZ:-false}
 RESHARD_AFTER_FORWARD=${AGZ_RESHARD_AFTER_FORWARD:-false}
 HF_FULL_ROLLOUT_REPLICA=${AGZ_HF_FULL_ROLLOUT_REPLICA:-true}
 STOP_ON_COMPLETE_JSON=${AGZ_STOP_ON_COMPLETE_JSON:-true}
+ENABLE_GRADIENT_CHECKPOINTING=${AGZ_ENABLE_GRADIENT_CHECKPOINTING:-true}
 
 mkdir -p "$(dirname "${DCA_FEEDBACK_LOG}")" "${CHECKPOINT_DIR}" "${ROOT}/logs"
 
@@ -118,6 +119,7 @@ for index in "${!GPU_IDS[@]}"; do
     --max-input-tokens "${AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS:-2048}" \
     --max-new-tokens "${AGZ_VDA_FEEDBACK_MAX_NEW_TOKENS:-384}" \
     --continuation-prompt-mode "${AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE:-legacy}" \
+    --history-window "${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-0}" \
     --invalid-action-patience "${AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE:-0}" \
     --attn-implementation "${VDA_FEEDBACK_ATTN_IMPLEMENTATION}" \
     --top-p "${AGZ_VDA_FEEDBACK_TOP_P:-1.0}" \
@@ -175,6 +177,9 @@ echo "DCA GPU layout=${DCA_GPU_LAYOUT} GPUs=${DCA_GPUS}; VDA feedback GPUs=${DCA
 echo "DCA feedback services=${AGZ_VDA_FEEDBACK_URLS}"
 echo "DCA feedback attention=${VDA_FEEDBACK_ATTN_IMPLEMENTATION}"
 echo "DCA parent VDA adapter=${VDA_ADAPTER_PATH:-base}"
+echo "DCA feedback history_window=${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-0}"
+echo "DCA reward fsync_every_batches=${AGZ_DCA_REWARD_FSYNC_EVERY_BATCHES:-1}"
+echo "DCA gradient_checkpointing=${ENABLE_GRADIENT_CHECKPOINTING}"
 echo "DCA resume_mode=${RESUME_MODE} resume_from_path=${RESUME_FROM_PATH} target_steps=${MAX_STEPS}"
 
 export CUDA_VISIBLE_DEVICES="${DCA_GPUS}"
@@ -203,7 +208,7 @@ PYTHONUNBUFFERED=1 python -s -m verl_tool.trainer.main_ppo \
     custom_reward_function.path="${ROOT}/curriculum/reward_function/dca_online_reward.py" \
     custom_reward_function.name=compute_score \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.model.enable_gradient_checkpointing="${ENABLE_GRADIENT_CHECKPOINTING}" \
     actor_rollout_ref.model.enable_activation_offload="${ENABLE_ACTIVATION_OFFLOAD}" \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.trust_remote_code=True \
