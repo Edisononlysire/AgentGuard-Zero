@@ -42,6 +42,7 @@ class ContextualTrustManager:
         self.claim_trust: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.applied_trust_evidence: set[tuple[str, str]] = set()
+        self.last_advanced_time = -1
 
     def ensure_source(self, source_id: str, *, public_prior: float = 0.5, time: int = 0) -> dict[str, Any]:
         source_id = str(source_id or "unknown")
@@ -55,6 +56,7 @@ class ContextualTrustManager:
                 "uncertainty": 1.0 / (self.prior_strength + 1.0),
                 "status": "uncertain",
                 "last_updated_at": int(time),
+                "last_decayed_at": int(time),
                 "last_verified_at": None,
                 "last_conflict_at": None,
                 "support_streak": 0,
@@ -94,7 +96,7 @@ class ContextualTrustManager:
         }
 
     def _decay_source(self, source: dict[str, Any], *, time: int) -> None:
-        elapsed = max(0, int(time) - int(source.get("last_updated_at", time)))
+        elapsed = max(0, int(time) - int(source.get("last_decayed_at", time)))
         if elapsed <= 0:
             return
         factor = self.decay**elapsed
@@ -105,6 +107,9 @@ class ContextualTrustManager:
         source["beta"] = self.prior_strength * (1.0 - prior) + factor * (
             float(source["beta"]) - self.prior_strength * (1.0 - prior)
         )
+        for key in ("support_streak", "conflict_streak", "recovery_streak"):
+            source[key] = max(0, int(source.get(key, 0)) - elapsed)
+        source["last_decayed_at"] = int(time)
 
     @staticmethod
     def _refresh_source(source: dict[str, Any]) -> None:
@@ -119,6 +124,30 @@ class ContextualTrustManager:
             source["status"] = "stable"
         else:
             source["status"] = "uncertain"
+
+    @staticmethod
+    def _recompute_claim_from_components(
+        claim: dict[str, Any],
+        source: dict[str, Any],
+        *,
+        time: int | None = None,
+    ) -> None:
+        support = _clamp(claim.get("_support_signal", 0.0))
+        contradiction = _clamp(claim.get("_contradiction_signal", 0.0))
+        claim["score"] = _clamp(
+            float(source["mean"]) + 0.45 * support - 0.60 * contradiction
+        )
+        has_evidence = bool(claim.get("evidence_refs"))
+        if contradiction >= 0.5 or (has_evidence and claim["score"] <= 0.30):
+            claim["status"] = "contradicted"
+        elif claim["score"] >= 0.70 and support > contradiction:
+            claim["status"] = "supported"
+        elif has_evidence:
+            claim["status"] = "challenged"
+        else:
+            claim["status"] = "unassessed"
+        if time is not None:
+            claim["updated_at"] = int(time)
 
     def _refresh_claim(
         self,
@@ -142,16 +171,24 @@ class ContextualTrustManager:
         claim["contradiction_score"] = _clamp(negative / 2.0)
         support = _clamp(positive / 3.0)
         contradiction = _clamp(negative / 3.0)
-        claim["score"] = _clamp(0.55 * float(source["mean"]) + 0.45 * support - 0.60 * contradiction)
-        if contradiction >= 0.5 or claim["score"] <= 0.30:
-            claim["status"] = "contradicted"
-        elif claim["score"] >= 0.70 and support > contradiction:
-            claim["status"] = "supported"
-        elif records:
-            claim["status"] = "challenged"
-        else:
-            claim["status"] = "unassessed"
-        claim["updated_at"] = int(time)
+        claim["_support_signal"] = support
+        claim["_contradiction_signal"] = contradiction
+        self._recompute_claim_from_components(claim, source, time=time)
+
+    def advance_time(self, time: int) -> None:
+        """Apply recency decay exactly once for each environment time step."""
+
+        time = int(time)
+        if time <= self.last_advanced_time:
+            return
+        for source in self.source_reputation.values():
+            self._decay_source(source, time=time)
+            self._refresh_source(source)
+        for claim in self.claim_trust.values():
+            source = self.source_reputation.get(str(claim.get("source_id", "")))
+            if source is not None:
+                self._recompute_claim_from_components(claim, source)
+        self.last_advanced_time = time
 
     def apply(
         self,

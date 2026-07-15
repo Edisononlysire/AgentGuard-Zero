@@ -166,6 +166,38 @@ def _hard_gate(
             violations.add("invalid_memory_promotion_state")
 
     tool = str(packet.get("tool_call", {}).get("name", "None"))
+    tool_args = packet.get("tool_call", {}).get("args", {}) or {}
+    if tool == "CrossCheck":
+        crosscheck_refs = [
+            str(item) for item in tool_args.get("evidence_ids", []) or [] if str(item)
+        ]
+        if not crosscheck_refs:
+            violations.add("crosscheck_requires_evidence_ids")
+        elif any(ref not in available for ref in crosscheck_refs):
+            violations.add("crosscheck_unknown_or_unavailable_evidence")
+        else:
+            target_event_id = str(tool_args.get("event_id", ""))
+            target_record = next(
+                (
+                    record
+                    for record in available.values()
+                    if str(record.get("event_id", "")) == target_event_id
+                ),
+                None,
+            )
+            target_claim = (
+                (target_record.get("content", {}) or {}).get("claim_semantics", {})
+                if isinstance(target_record, dict)
+                else {}
+            )
+            if not target_claim:
+                violations.add("crosscheck_unknown_event_claim")
+            elif any(
+                ((available[ref].get("content", {}) or {}).get("claim_semantics", {}) or {})
+                != target_claim
+                for ref in crosscheck_refs
+            ):
+                violations.add("crosscheck_incompatible_claim_evidence")
     remaining_verification = _float(
         observation.get("defense_context", {}).get("remaining_verification_budget", 0.0)
     )
@@ -297,6 +329,116 @@ def score_v5c_candidate(public_context: dict[str, Any], text: str, *, index: int
     )
 
 
+def safe_probe_fallback(
+    public_context: dict[str, Any],
+    scored: Iterable[V5CCandidate] = (),
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a bounded public-state probe when every sampled action is inadmissible."""
+
+    assert_public(public_context)
+    observation = _public_observation(public_context)
+    remaining = _float(
+        observation.get("defense_context", {}).get("remaining_verification_budget", 0.0)
+    )
+    events = [
+        event
+        for event in observation.get("observed_events", []) or []
+        if isinstance(event, dict) and str(event.get("event_id", ""))
+    ]
+    claims = (
+        observation.get("defender_state", {})
+        .get("trust", {})
+        .get("current_claim_trust", {})
+        or {}
+    )
+
+    def packet_for(tool: str, args: dict[str, Any], reason: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        packet = copy.deepcopy(DEFAULT_ACTION_PACKET_V4)
+        packet["tool_call"] = {"name": tool, "args": copy.deepcopy(args)}
+        packet["safety_check"]["justification"] = reason
+        return packet, {
+            "fallback": "safe_active_probe",
+            "fallback_type": tool,
+            "fallback_reason": reason,
+        }
+
+    unresolved = [
+        event
+        for event in events
+        if str((claims.get(str(event.get("event_id")), {}) or {}).get("status", "unassessed"))
+        in {"unassessed", "challenged"}
+    ]
+    if unresolved and remaining + 1e-9 >= _float(TOOL_COSTS["SourceChallenge"]):
+        return packet_for(
+            "SourceChallenge",
+            {"event_id": str(unresolved[0]["event_id"])},
+            "unresolved public claim",
+        )
+
+    sources = (
+        observation.get("defender_state", {})
+        .get("trust", {})
+        .get("source_reputation", {})
+        or {}
+    )
+    uncertain = [
+        event
+        for event in events
+        if (
+            _float((sources.get(str(event.get("source_id", "")), {}) or {}).get("mean", 0.5), 0.5) < 0.55
+            or _float(
+                (sources.get(str(event.get("source_id", "")), {}) or {}).get("uncertainty", 1.0),
+                1.0,
+            )
+            > 0.30
+        )
+    ]
+    if uncertain and remaining + 1e-9 >= _float(TOOL_COSTS["CanaryProbe"]):
+        return packet_for(
+            "CanaryProbe",
+            {"event_id": str(uncertain[0]["event_id"])},
+            "uncertain telemetry source",
+        )
+
+    public_assets = {
+        str(asset.get("id", "")): asset
+        for asset in observation.get("defense_context", {}).get("public_assets", []) or []
+        if isinstance(asset, dict) and str(asset.get("id", ""))
+    }
+    high_impact = next(
+        (
+            item.packet.get("response", {})
+            for item in scored
+            if item.parse_ok
+            and str(item.packet.get("response", {}).get("action", "")) in HIGH_IMPACT_ACTIONS
+            and str(item.packet.get("response", {}).get("target", "")) in public_assets
+        ),
+        None,
+    )
+    if high_impact and remaining + 1e-9 >= _float(TOOL_COSTS["ShadowActionProbe"]):
+        return packet_for(
+            "ShadowActionProbe",
+            {"action": copy.deepcopy(high_impact)},
+            "high-impact consequence uncertain",
+        )
+
+    if events and public_assets and remaining + 1e-9 >= _float(TOOL_COSTS["DecoyProbe"]):
+        entity = str(events[0].get("entity_id", ""))
+        asset = public_assets.get(entity) or next(iter(public_assets.values()))
+        return packet_for(
+            "DecoyProbe",
+            {"zone": str(asset.get("zone", "unknown"))},
+            "activity requires discrimination",
+        )
+
+    packet = copy.deepcopy(DEFAULT_ACTION_PACKET_V4)
+    return packet, {
+        "fallback": "safe_observe",
+        "fallback_type": "Observe",
+        "fallback_reason": "no legal probe or budget",
+    }
+
+
 def select_v5c(public_context: dict[str, Any], candidates: Iterable[str]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Select a candidate using only public observation and defender state."""
 
@@ -306,13 +448,14 @@ def select_v5c(public_context: dict[str, Any], candidates: Iterable[str]) -> tup
         for index, text in enumerate(candidates)
     ]
     if not scored:
-        return copy.deepcopy(DEFAULT_ACTION_PACKET_V4), {"selected_index": -1, "fallback": "empty_candidates"}
+        packet, fallback = safe_probe_fallback(public_context)
+        return packet, {"selected_index": -1, "candidates": [], **fallback}
     admissible = [item for item in scored if item.parse_ok and item.admissible]
     if not admissible:
+        packet, fallback = safe_probe_fallback(public_context, scored)
         diagnostics = {
             "selector": "v5_c_evidence_constrained_runtime_governor",
             "selected_index": -1,
-            "fallback": "no_admissible_candidate",
             "candidates": [
                 {
                     "index": item.index,
@@ -322,9 +465,10 @@ def select_v5c(public_context: dict[str, Any], candidates: Iterable[str]) -> tup
                 }
                 for item in scored
             ],
+            **fallback,
         }
         assert_public(diagnostics)
-        return copy.deepcopy(DEFAULT_ACTION_PACKET_V4), diagnostics
+        return packet, diagnostics
     selected = max(admissible, key=lambda item: (item.worst_case_utility, item.score, -item.index))
     diagnostics = {
         "selector": "v5_c_evidence_constrained_runtime_governor",

@@ -1,4 +1,4 @@
-# AgentGuard-Zero V5-C Evidence-Constrained Runtime Governor
+# AgentGuard-Zero V5-C Evidence-Constrained Robust Public-State Governor
 
 AgentGuard-Zero-Select is the frozen-parameter deployment variant. It uses the
 same structured VDA action schema, active probing actions, profile-memory
@@ -43,15 +43,17 @@ S_public(o, a) =
   and penalizes unverified confirmation.
 - `S_business_safety` favors reversible controls and penalizes unsupported
   high-impact responses.
-- `S_robustness` favors actions robust to public trust-conflict,
-  spoofability, poisoning, and overresponse indicators.
+- `S_robustness` favors actions robust to public trust conflict, telemetry
+  inconsistency, poisoning, and overresponse indicators.
 
 Candidate-declared uncertainty, business cost, and overresponse risk remain
 model outputs; V5-C does not treat them as ground-truth safety facts. Its gate
 and ranking derive authorization, target validity, evidence state, trust state,
 memory provenance, budget, and asset criticality from the public environment.
-If no candidate is admissible, the governor returns a conservative `Observe`
-fallback rather than executing the least-invalid proposal.
+If no candidate is admissible, the governor derives a bounded active probe from
+the current public claim, trust, budget, and asset state. It uses `Observe` only
+when no legal probe is available or the verification budget is exhausted. It
+never executes the least-invalid proposal.
 
 If suspicious evidence appears and sampled candidates contain no active probe,
 V5-C may add a `SourceChallenge` candidate using only public state. Later, the

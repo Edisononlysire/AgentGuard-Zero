@@ -1129,10 +1129,195 @@ class TMCDV2ReleaseTests(unittest.TestCase):
 
 
 class TMCDV2TeacherReviewTests(unittest.TestCase):
+    def test_multi_event_same_time_oracle_ledger_records_every_event(self) -> None:
+        scenario = minimal_example_v2()
+        second = copy.deepcopy(scenario["event_schedule"][-1])
+        second["event_id"] = "event-same-time-b"
+        second["time"] = 0
+        scenario["event_schedule"].append(second)
+        env = CyberDefenseEnvV2(scenario)
+        observation = env.observe()
+        public_ids = {event["event_id"] for event in observation["observed_events"]}
+        ledger_ids = {event["event_id"] for event in env.oracle_ledger.snapshot()}
+        self.assertIn("event-prefix-0", public_ids)
+        self.assertIn("event-same-time-b", public_ids)
+        self.assertTrue({"event-prefix-0", "event-same-time-b"}.issubset(ledger_ids))
+
+    def test_crosscheck_roots_are_derived_from_evidence_not_source_names(self) -> None:
+        scenario = minimal_example_v2()
+        second = copy.deepcopy(scenario["event_schedule"][-1])
+        second["event_id"] = "event-same-claim-b"
+        second["time"] = 0
+        scenario["event_schedule"].append(second)
+
+        forged = CyberDefenseEnvV2(copy.deepcopy(scenario))
+        observation = forged.observe()
+        first = next(event for event in observation["observed_events"] if event["event_id"] == "event-prefix-0")
+        forged.step(
+            _action(
+                tool_call={
+                    "name": "CrossCheck",
+                    "args": {"event_id": first["event_id"], "sources": ["sensor-B"]},
+                }
+            )
+        )
+        self.assertEqual(
+            forged.last_tool_result["error"],
+            "crosscheck_requires_evidence_ids",
+        )
+
+        valid_env = CyberDefenseEnvV2(copy.deepcopy(scenario))
+        observation = valid_env.observe()
+        first = next(event for event in observation["observed_events"] if event["event_id"] == "event-prefix-0")
+        second_public = next(
+            event for event in observation["observed_events"] if event["event_id"] == "event-same-claim-b"
+        )
+        valid_env.step(
+            _action(
+                tool_call={
+                    "name": "CrossCheck",
+                    "args": {
+                        "event_id": first["event_id"],
+                        "evidence_ids": [second_public["evidence_id"]],
+                        "sources": ["fabricated-source"],
+                    },
+                }
+            )
+        )
+        tool_evidence = valid_env.evidence_store.get(
+            valid_env.last_tool_result["evidence_id"],
+            time=1,
+        )
+        self.assertEqual(set(tool_evidence["root_source_ids"]), {"sensor-A", "sensor-B"})
+        self.assertNotIn("fabricated-source", tool_evidence["root_source_ids"])
+
+    def test_train_and_full_share_pre_state_response_authorization(self) -> None:
+        env = CyberDefenseEnvV2(minimal_example_v2())
+        observation = env.observe()
+        event = observation["observed_events"][0]
+        parent = event["evidence_id"]
+        support = env.evidence_store.add_tool_result(
+            {
+                "tool": "CrossCheck",
+                "event_id": event["event_id"],
+                "verdict": "supported",
+                "claim_semantics": copy.deepcopy(event["claim_semantics"]),
+                "root_source_ids": ["sensor-B"],
+            },
+            time=-1,
+            parent_evidence_ids=[parent],
+        )
+        packet = _action(
+            evidence_assessment=[
+                {"event_id": event["event_id"], "status": "supported", "suspected_poisoning": False}
+            ],
+            trust_operations=[
+                {
+                    "op": "support",
+                    "source_id": "sensor-A",
+                    "event_id": event["event_id"],
+                    "evidence_refs": [support],
+                }
+            ],
+            response={"tier": "L3", "action": "Isolate", "target": "database"},
+            belief={
+                "exfiltration": 0.85,
+                "sabotage": 0.05,
+                "persistence": 0.05,
+                "credential_theft": 0.05,
+            },
+        )
+        scored = score_v5c_candidate({"observation": observation}, json.dumps(packet))
+        self.assertFalse(scored.admissible)
+        env.step(packet)
+        self.assertTrue(env.history[-1]["response_result"]["blocked"])
+        self.assertTrue(env.history[-1]["trust_events"][0]["committed"])
+        self.assertEqual(env.trust_manager.claim_for(event["event_id"])["status"], "supported")
+
+    def test_safe_probe_fallback_observes_only_when_budget_exhausted(self) -> None:
+        env = CyberDefenseEnvV2(minimal_example_v2())
+        context = {"observation": env.observe()}
+        selected, diagnostics = select_v5c(context, ["{}"])
+        self.assertEqual(selected["tool_call"]["name"], "SourceChallenge")
+        self.assertEqual(diagnostics["fallback_type"], "SourceChallenge")
+
+        exhausted = copy.deepcopy(context)
+        exhausted["observation"]["defense_context"]["remaining_verification_budget"] = 0.0
+        selected, diagnostics = select_v5c(exhausted, ["{}"])
+        self.assertEqual(selected["tool_call"]["name"], "None")
+        self.assertEqual(diagnostics["fallback_type"], "Observe")
+
+    def test_global_trust_decay_is_time_advanced_and_idempotent(self) -> None:
+        manager = ContextualTrustManager(decay=0.8)
+        source = manager.ensure_source("sensor-A", public_prior=0.5, time=0)
+        source["alpha"] = 8.0
+        source["beta"] = 2.0
+        manager._refresh_source(source)
+        before = source["mean"]
+        manager.advance_time(5)
+        after = source["mean"]
+        manager.advance_time(5)
+        self.assertLess(abs(after - 0.5), abs(before - 0.5))
+        self.assertEqual(source["mean"], after)
+
+    def test_duplicate_ingest_noops_and_new_evidence_merges(self) -> None:
+        store = EvidenceStore()
+        claim = {
+            "entity_id": "database",
+            "predicate": "attack_objective",
+            "object": "exfiltration",
+            "scope": "cyber_defense",
+        }
+        first = store.add_event(
+            {
+                "event_id": "event-a",
+                "source_id": "sensor-A",
+                "claim_semantics": claim,
+            },
+            time=0,
+        )
+        second = store.add_event(
+            {
+                "event_id": "event-b",
+                "source_id": "sensor-B",
+                "claim_semantics": claim,
+            },
+            time=0,
+        )
+        memory = EvidenceStateMemory()
+        trust = ContextualTrustManager()
+
+        def ingest(ref: str, source: str) -> dict:
+            return memory.apply(
+                [
+                    {
+                        "op": "ingest",
+                        "claim": claim,
+                        "source_ids": [source],
+                        "evidence_refs": [ref],
+                        "target_status": "quarantined",
+                    }
+                ],
+                evidence_store=store,
+                trust_manager=trust,
+                time=0,
+            )[0]
+
+        created = ingest(first, "sensor-A")
+        duplicate = ingest(first, "sensor-A")
+        merged = ingest(second, "sensor-B")
+        record = memory.records[created["memory_id"]]
+        self.assertFalse(duplicate["committed"])
+        self.assertEqual(duplicate["reason"], "duplicate_ingest")
+        self.assertTrue(merged["committed"])
+        self.assertEqual(merged["reason"], "evidence_merged")
+        self.assertEqual(record["version"], 2)
+        self.assertEqual(set(record["source_ids"]), {"sensor-A", "sensor-B"})
+
     def test_train_k_selector_controls_are_registered_and_reproducible(self) -> None:
         controls = {
             "agentguard_zero_train_random_k",
-            "agentguard_zero_train_generic_best_of_k",
+            "agentguard_zero_train_mitigation_best_of_k",
             "agentguard_zero_train_soft_v5c",
         }
         self.assertTrue(controls.issubset(set(SYSTEMS)))
@@ -1452,8 +1637,8 @@ class TMCDV2TeacherReviewTests(unittest.TestCase):
             ]
         )
         selected, diagnostics = select_v5c(context, [json.dumps(invalid)])
-        self.assertEqual(selected, DEFAULT_ACTION_PACKET_V4)
-        self.assertEqual(diagnostics["fallback"], "no_admissible_candidate")
+        self.assertEqual(selected["tool_call"]["name"], "SourceChallenge")
+        self.assertEqual(diagnostics["fallback"], "safe_active_probe")
 
     def test_decision_horizon_covers_late_events(self) -> None:
         scenario = minimal_example_v2()

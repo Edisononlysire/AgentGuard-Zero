@@ -121,6 +121,7 @@ class HiddenWorld:
             if belief_matches and target_matches
             else 0.0
         )
+        pressure_before = float(self.attack_pressure)
         self.attack_pressure = max(0.0, self.attack_pressure - effective)
         self.mitigated = self.attack_pressure <= 1e-6
         self.response_history.append(
@@ -133,6 +134,8 @@ class HiddenWorld:
                 "phase_compatibility": phase_compatibility,
                 "mitigation_strength": strength,
                 "effective_strength": effective,
+                "attack_pressure_before": pressure_before,
+                "attack_pressure_after": float(self.attack_pressure),
             }
         )
 

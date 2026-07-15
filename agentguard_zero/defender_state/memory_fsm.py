@@ -140,13 +140,59 @@ class EvidenceStateMemory:
                         ],
                     }
                     self.claim_index[claim_key] = memory_id
+                    reason = (
+                        "direct_confirm_downgraded"
+                        if operation.get("target_status") == "confirmed"
+                        else "new_claim_ingested"
+                    )
+                    result = {
+                        "committed": True,
+                        "op": op,
+                        "memory_id": memory_id,
+                        "status": "quarantined",
+                        "fallback": operation.get("target_status") == "confirmed",
+                        "reason": reason,
+                    }
+                    results.append(result)
+                    self.events.append(copy.deepcopy(result) | {"time": int(time)})
+                    continue
+
+                record = self.records[memory_id]
+                existing_refs = set(record.get("evidence_refs", []))
+                new_refs = sorted(set(refs) - existing_refs)
+                if not new_refs:
+                    result = {
+                        "committed": False,
+                        "op": op,
+                        "memory_id": memory_id,
+                        "status": str(record.get("status", "quarantined")),
+                        "reason": "duplicate_ingest",
+                    }
+                    results.append(result)
+                    self.events.append(copy.deepcopy(result) | {"time": int(time)})
+                    continue
+
+                merged_refs = sorted(existing_refs | set(new_refs))
+                record["evidence_refs"] = merged_refs
+                record["source_ids"] = evidence_store.root_sources(merged_refs, time=time)
+                record["updated_at"] = int(time)
+                record["version"] = int(record.get("version", 1)) + 1
+                transition = {
+                    "from": str(record["status"]),
+                    "to": str(record["status"]),
+                    "op": "ingest",
+                    "evidence_refs": new_refs,
+                    "time": int(time),
+                    "reason": "evidence_merged",
+                }
+                record["transition_history"].append(transition)
                 result = {
                     "committed": True,
                     "op": op,
                     "memory_id": memory_id,
-                    "status": "quarantined",
-                    "fallback": operation.get("target_status") == "confirmed",
-                    "reason": "direct_confirm_downgraded" if operation.get("target_status") == "confirmed" else "ok",
+                    "status": str(record["status"]),
+                    "merged_evidence_refs": new_refs,
+                    "reason": "evidence_merged",
                 }
                 results.append(result)
                 self.events.append(copy.deepcopy(result) | {"time": int(time)})

@@ -36,8 +36,9 @@ if str(ROOT / "scripts") not in sys.path:
 
 import eval_level1_select as base
 from agentguard_zero.governance.v5c import score_v5c_candidate, select_v5c_json
-from agentguard_zero.schemas.action_schema_v4 import parse_action_json_v4
-from agentguard_zero.training.vda_dataset import scenario_to_training_row
+from agentguard_zero.schemas.action_schema_v4 import DEFAULT_ACTION_PACKET_V4, parse_action_json_v4
+from agentguard_zero.tools.business_impact import estimate_business_impact
+from agentguard_zero.training.vda_dataset import scenario_horizon, scenario_to_training_row
 from level1_rollout_server import Level1RolloutStore
 from vda_feedback_server import _generation_messages, _history_summary
 
@@ -55,14 +56,17 @@ SYSTEMS = [
     "agentguard_zero_select",
     "agentguard_zero_train",
     "agentguard_zero_train_random_k",
-    "agentguard_zero_train_generic_best_of_k",
+    "agentguard_zero_train_mitigation_best_of_k",
     "agentguard_zero_train_soft_v5c",
     "agentguard_zero_full",
     "oracle_defender",
 ]
 
 INTERNAL_SYSTEMS = {"random_policy"}
-SYSTEM_ALIASES = {"agentguard_zero_train_select": "agentguard_zero_full"}
+SYSTEM_ALIASES = {
+    "agentguard_zero_train_select": "agentguard_zero_full",
+    "agentguard_zero_train_generic_best_of_k": "agentguard_zero_train_mitigation_best_of_k",
+}
 
 SYSTEM_DISPLAY = {
     "rule_based_soc": "Rule-based SOC",
@@ -77,7 +81,7 @@ SYSTEM_DISPLAY = {
     "agentguard_zero_select": "AgentGuard-Zero-Select",
     "agentguard_zero_train": "AgentGuard-Zero-Train",
     "agentguard_zero_train_random_k": "AgentGuard-Zero-Train + Random-K",
-    "agentguard_zero_train_generic_best_of_k": "AgentGuard-Zero-Train + Generic Best-of-K",
+    "agentguard_zero_train_mitigation_best_of_k": "AgentGuard-Zero-Train + Mitigation-Heuristic Best-of-K",
     "agentguard_zero_train_soft_v5c": "AgentGuard-Zero-Train + Soft V5-C",
     "agentguard_zero_full": "AgentGuard-Zero-Full",
     "oracle_defender": "Oracle Defender",
@@ -107,14 +111,14 @@ MODEL_SYSTEMS = {
     "agentguard_zero_select",
     "agentguard_zero_train",
     "agentguard_zero_train_random_k",
-    "agentguard_zero_train_generic_best_of_k",
+    "agentguard_zero_train_mitigation_best_of_k",
     "agentguard_zero_train_soft_v5c",
     "agentguard_zero_full",
 }
 
 TRAINED_K_CONTROLS = {
     "agentguard_zero_train_random_k",
-    "agentguard_zero_train_generic_best_of_k",
+    "agentguard_zero_train_mitigation_best_of_k",
     "agentguard_zero_train_soft_v5c",
 }
 
@@ -156,8 +160,35 @@ def task_name(row: dict[str, Any]) -> str:
 
 
 def first_event_id(public_context: Any) -> str:
-    event_ids = base.public_signals(public_context).get("event_ids") or ["event-0"]
-    return str(event_ids[0])
+    observation = v2_observation(public_context)
+    if observation is not None:
+        events = [
+            item
+            for item in observation.get("observed_events", []) or []
+            if isinstance(item, dict) and str(item.get("event_id", ""))
+        ]
+        source_state = (
+            observation.get("defender_state", {})
+            .get("trust", {})
+            .get("source_reputation", {})
+            or {}
+        )
+
+        def uncertainty_key(event: dict[str, Any]) -> tuple[float, str]:
+            source = source_state.get(str(event.get("source_id", "")), {}) or {}
+            risk = (
+                1.0 - base.safe_float(source.get("mean", 0.5), 0.5)
+                + base.safe_float(source.get("uncertainty", 1.0), 1.0)
+            )
+            return risk, str(event.get("event_id", ""))
+
+        if events:
+            return str(max(events, key=uncertainty_key).get("event_id", "event-0"))
+    event_ids = sorted(
+        str(item)
+        for item in (base.public_signals(public_context).get("event_ids") or ["event-0"])
+    )
+    return event_ids[0]
 
 
 def scenario_target(scenario: dict[str, Any]) -> str:
@@ -254,7 +285,7 @@ def adapt_packet_v2(action_packet: dict[str, Any], public_context: Any) -> dict[
         return action_packet
     events = [item for item in observation.get("observed_events", []) or [] if isinstance(item, dict)]
     event_by_id = {str(item.get("event_id", "")): item for item in events}
-    tool = action_packet.get("tool_call", {}) or {"name": "None", "args": {}}
+    tool = copy.deepcopy(action_packet.get("tool_call", {}) or {"name": "None", "args": {}})
     tool_args = tool.get("args", {}) if isinstance(tool.get("args", {}), dict) else {}
     requested_event_id = str(tool_args.get("event_id", ""))
     primary_event = event_by_id.get(requested_event_id)
@@ -267,6 +298,19 @@ def adapt_packet_v2(action_packet: dict[str, Any], public_context: Any) -> dict[
     event_id = str(primary_event.get("event_id", "event-0"))
     evidence_id = str(primary_event.get("evidence_id", ""))
     refs = [evidence_id] if evidence_id else []
+    if str(tool.get("name", "None")) == "CrossCheck":
+        claim_semantics = primary_event.get("claim_semantics", {}) or {}
+        compatible_refs = [
+            str(event.get("evidence_id", ""))
+            for event in events
+            if str(event.get("evidence_id", ""))
+            and (event.get("claim_semantics", {}) or {}) == claim_semantics
+            and str(event.get("event_id", "")) != event_id
+        ]
+        tool["args"] = {
+            "event_id": event_id,
+            "evidence_ids": compatible_refs[:6] or refs,
+        }
     old_memory = action_packet.get("memory_update", {}) or {}
     memory_operations: list[dict[str, Any]] = []
     claim = primary_event.get("claim_semantics") or {
@@ -387,39 +431,65 @@ def rule_based_soc_action(public_context: Any, scenario: dict[str, Any] | None, 
 
 def oracle_action(public_context: Any, scenario: dict[str, Any] | None, turn: int) -> dict[str, Any]:
     scenario = scenario or {}
-    event_id = first_event_id(public_context)
     target = scenario_target(scenario)
     true_objective = scenario_true_objective(scenario)
     belief = normalize_belief(true_objective)
-    if turn == 0:
+    observation = v2_observation(public_context)
+    if observation is None:
         return packet(
             belief=belief,
-            event_id=event_id,
-            tool="ProvenanceCheck",
-            action="QueryProvenance",
+            event_id=first_event_id(public_context),
+            action="ShadowBlock",
             target=target,
-            rejected=[],
-            quarantine=[event_id],
-            rationale="oracle checks decisive evidence",
-            uncertainty=0.20,
+            rationale=f"oracle bounded containment for {target}",
+            uncertainty=0.10,
         )
-    return packet(
-        belief=belief,
-        event_id=event_id,
-        tool="None",
-        action="ShadowBlock",
-        target=target,
-        confirmed=[true_objective],
-        rationale=f"oracle bounded containment for {target}",
-        business_risk=0.15,
-        overresponse_risk=0.10,
-        uncertainty=0.10,
+
+    action = "Observe"
+    remaining = base.safe_float(
+        observation.get("defense_context", {}).get("remaining_business_budget", 0.0),
+        0.0,
     )
+    criticality = next(
+        (
+            base.safe_float(asset.get("criticality", 0.5), 0.5)
+            for asset in observation.get("defense_context", {}).get("public_assets", []) or []
+            if str(asset.get("id", "")) == target
+        ),
+        0.5,
+    )
+    phases = list(scenario.get("true_attack", {}).get("phase_schedule", []) or [])
+    duration = max(1, math.ceil(scenario_horizon(scenario) / max(1, len(phases))))
+    phase_index = min(turn // duration, max(0, len(phases) - 1))
+    phase = str(phases[phase_index]) if phases else "unknown"
+    isolate_cost = base.safe_float(
+        estimate_business_impact({"action": "Isolate", "target": target}, criticality).get(
+            "estimated_cost", 0.0
+        ),
+        0.0,
+    )
+    if phase in {"discovery", "lateral_movement", "collection", "exfiltration"} and isolate_cost <= remaining + 1e-9:
+        action = "Isolate"
+
+    result = copy.deepcopy(DEFAULT_ACTION_PACKET_V4)
+    result["belief"] = belief
+    result["uncertainty"] = 0.0
+    result["response"] = {
+        "tier": "L3" if action == "Isolate" else "L0",
+        "action": action,
+        # Keep the oracle's true target explicit even while it waits. Observe
+        # is non-targeted, so this does not execute a response against it.
+        "target": target,
+    }
+    result["safety_check"]["justification"] = "oracle minimum sufficient response"
+    return result
 
 
 def random_action(public_context: Any, scenario: dict[str, Any] | None, turn: int) -> dict[str, Any]:
     rng = random.Random(str(public_context)[:1000] + str(turn))
-    event_id = first_event_id(public_context)
+    signals = base.public_signals(public_context)
+    event_ids = sorted(str(item) for item in (signals.get("event_ids") or ["event-0"]))
+    event_id = rng.choice(event_ids)
     belief = {key: rng.random() for key in base.OBJECTIVE_KEYS}
     total = sum(belief.values()) or 1.0
     belief = {key: value / total for key, value in belief.items()}
@@ -493,7 +563,7 @@ def system_prompt(system: str) -> str:
         "agentguard_zero_train_random_k": (
             common + " Use the trained AgentGuard-Zero VDA policy to generate diverse candidate actions."
         ),
-        "agentguard_zero_train_generic_best_of_k": (
+        "agentguard_zero_train_mitigation_best_of_k": (
             common + " Use the trained AgentGuard-Zero VDA policy to generate diverse candidate actions."
         ),
         "agentguard_zero_train_soft_v5c": (
@@ -622,8 +692,8 @@ def effective_selector_mode(system: str, requested: str) -> str:
     system = canonical_system_id(system)
     if system == "agentguard_zero_train_random_k":
         return "random_k"
-    if system == "agentguard_zero_train_generic_best_of_k":
-        return "generic_best_of_k"
+    if system == "agentguard_zero_train_mitigation_best_of_k":
+        return "mitigation_heuristic_best_of_k"
     if system == "agentguard_zero_train_soft_v5c":
         return "v5_c_soft_score_only"
     if system in {"agentguard_zero_select", "agentguard_zero_full"}:
@@ -632,7 +702,7 @@ def effective_selector_mode(system: str, requested: str) -> str:
 
 
 def candidate_scoring_mode(system: str, requested: str) -> str:
-    if system in {"agentguard_zero_train_random_k", "agentguard_zero_train_generic_best_of_k"}:
+    if system in {"agentguard_zero_train_random_k", "agentguard_zero_train_mitigation_best_of_k"}:
         return "mitigation_v2"
     return requested
 
@@ -666,7 +736,7 @@ def select_runtime_candidate(
             0.0,
             {"selector": "random_k", "selected_index": index},
         )
-    if observation is not None and system == "agentguard_zero_train_generic_best_of_k":
+    if observation is not None and system == "agentguard_zero_train_mitigation_best_of_k":
         selected = base.select_candidate(
             public_context,
             raw_candidates,
@@ -674,7 +744,7 @@ def select_runtime_candidate(
             selector_mode="mitigation_v2",
         )
         selected.diagnostics = dict(selected.diagnostics)
-        selected.diagnostics["selector"] = "generic_best_of_k"
+        selected.diagnostics["selector"] = "mitigation_heuristic_best_of_k"
         return selected
     if observation is not None and system == "agentguard_zero_train_soft_v5c":
         scored = [
@@ -744,6 +814,8 @@ def row_context(row: dict[str, Any], row_index: int, args: argparse.Namespace) -
             metadata["experiment_variant"] = "append_only_memory"
         else:
             metadata["experiment_variant"] = "full"
+        if args.system == "oracle_defender":
+            metadata["oracle_defender"] = True
         scenario["metadata"] = metadata
         rebuilt = scenario_to_training_row(scenario, split=str(row.get("split", "eval")))
         row = {**row, **rebuilt}
@@ -1105,6 +1177,17 @@ def finalize_result(
             "business_cost": base.safe_float(score.get("business_cost", 0.0), 0.0),
             "verification_cost": base.safe_float(score.get("verification_cost", 0.0), 0.0),
             "probe_yield": base.safe_float(score.get("probe_yield", 0.0), 0.0),
+            "probe_result_availability": base.safe_float(
+                score.get("probe_result_availability_rate", 0.0), 0.0
+            ),
+            "decision_delay": base.safe_float(score.get("delay", 0.0), 0.0),
+            "normalized_episode_length": base.safe_float(
+                score.get("normalized_episode_length", 0.0), 0.0
+            ),
+            "false_containment": base.safe_float(
+                score.get("false_containment_rate", 0.0), 0.0
+            ),
+            "excess_severity": base.safe_float(score.get("excess_severity", 0.0), 0.0),
             "memory_recovery": base.safe_float(score.get("memory_recovery_rate", 0.0), 0.0),
             "trust_brier": base.safe_float(score.get("claim_trust_brier", 0.0), 0.0),
         },
@@ -1180,6 +1263,21 @@ def summarize(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[s
         "business_cost": mean([item["tmcd_metrics"]["business_cost"] for item in results]),
         "verification_cost": mean([item["tmcd_metrics"]["verification_cost"] for item in results]),
         "probe_yield": mean([item["tmcd_metrics"].get("probe_yield", 0.0) for item in results]),
+        "probe_result_availability_rate": mean(
+            [item["tmcd_metrics"].get("probe_result_availability", 0.0) for item in results]
+        ),
+        "decision_delay": mean(
+            [item["tmcd_metrics"].get("decision_delay", 0.0) for item in results]
+        ),
+        "normalized_episode_length": mean(
+            [item["tmcd_metrics"].get("normalized_episode_length", 0.0) for item in results]
+        ),
+        "false_containment_rate": mean(
+            [item["tmcd_metrics"].get("false_containment", 0.0) for item in results]
+        ),
+        "excess_severity": mean(
+            [item["tmcd_metrics"].get("excess_severity", 0.0) for item in results]
+        ),
         "memory_recovery": mean([item["tmcd_metrics"].get("memory_recovery", 0.0) for item in results]),
         "claim_trust_brier": mean([item["tmcd_metrics"].get("trust_brier", 0.0) for item in results]),
         "overresponse_rate": mean([item["tmcd_metrics"]["overresponse"] for item in results]),

@@ -99,10 +99,34 @@ class AppendOnlyProfileMemory(EvidenceStateMemory):
                 }
                 self.claim_index[claim_key] = memory_id
                 reason = "ok"
+                committed = True
             else:
-                reason = "duplicate_claim_ignored"
+                record = self.records[memory_id]
+                existing_refs = set(record.get("evidence_refs", []))
+                new_refs = sorted(set(refs) - existing_refs)
+                if not new_refs:
+                    reason = "duplicate_ingest"
+                    committed = False
+                else:
+                    merged_refs = sorted(existing_refs | set(new_refs))
+                    record["evidence_refs"] = merged_refs
+                    record["source_ids"] = evidence_store.root_sources(merged_refs, time=time)
+                    record["updated_at"] = int(time)
+                    record["version"] = int(record.get("version", 1)) + 1
+                    record["transition_history"].append(
+                        {
+                            "from": str(record["status"]),
+                            "to": str(record["status"]),
+                            "op": "ingest",
+                            "evidence_refs": new_refs,
+                            "time": int(time),
+                            "reason": "evidence_merged",
+                        }
+                    )
+                    reason = "evidence_merged"
+                    committed = True
             result = {
-                "committed": True,
+                "committed": committed,
                 "op": op,
                 "memory_id": memory_id,
                 "status": str(self.records[memory_id]["status"]),

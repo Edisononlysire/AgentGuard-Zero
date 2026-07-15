@@ -82,7 +82,8 @@ class CyberDefenseEnvV2:
         self.attack_success = False
         self.last_tool_result: dict[str, Any] | None = None
         self.public_probe_state: list[dict[str, Any]] = []
-        self._observed_times: set[int] = set()
+        self._observed_event_ids: set[str] = set()
+        self._observed_internal_events: dict[str, dict[str, Any]] = {}
         self._last_retrieved_ids: set[str] = set()
         self._observation_cache: dict[int, dict[str, Any]] = {}
         self._source_priors = {
@@ -195,6 +196,12 @@ class CyberDefenseEnvV2:
         internal_events = [*self._internal_events(), *self._resolve_due_probes()]
         public_events: list[dict[str, Any]] = []
         for internal in internal_events:
+            internal_event_id = str(internal.get("event_id", ""))
+            if internal_event_id:
+                self._observed_internal_events.setdefault(
+                    internal_event_id,
+                    copy.deepcopy(internal),
+                )
             public = project_event(internal)
             evidence_id = self.evidence_store.add_event(public, time=self.t)
             public["evidence_id"] = evidence_id
@@ -205,24 +212,30 @@ class CyberDefenseEnvV2:
                 public_prior=self._source_priors.get(source_id, 0.5),
             )
             public_events.append(public)
-            if self.t not in self._observed_times and not internal.get("probe_generated"):
+            event_id = str(internal.get("event_id", ""))
+            if (
+                event_id
+                and event_id not in self._observed_event_ids
+                and not internal.get("probe_generated")
+            ):
                 self.oracle_ledger.append(
                     {
                         "time": self.t,
-                        "event_id": str(internal.get("event_id", "")),
+                        "event_id": event_id,
                         "source_id": source_id,
                         "truth_value": bool(internal.get("truth_value", not internal.get("is_fake", False))),
                         "objective_hint": str(internal.get("objective_hint", "")),
                         "claim_semantics": copy.deepcopy(internal.get("claim_semantics", {})),
                     }
                 )
-        self._observed_times.add(self.t)
+                self._observed_event_ids.add(event_id)
         return public_events
 
     def observe(self) -> dict[str, Any]:
         cached = self._observation_cache.get(self.t)
         if cached is not None:
             return copy.deepcopy(cached)
+        self.trust_manager.advance_time(self.t)
         events = self._register_current_events()
         retrieval = retrieve_memory(self.memory, events, time=self.t)
         self._last_retrieved_ids = set(retrieval.get("retrieved_memory_ids", []))
@@ -270,12 +283,11 @@ class CyberDefenseEnvV2:
                 }
             self.verification_cost += tool_cost
         requested_event_id = str(args.get("event_id", "unknown"))
-        event = self._find_internal_event(requested_event_id, snapshot)
+        event = self._observed_internal_events.get(requested_event_id)
+        if event is None:
+            event = self._find_internal_event(requested_event_id, snapshot)
         event_tools = {"CrossCheck", "ProvenanceCheck", "SourceChallenge", "CanaryProbe"}
-        event_available = any(
-            str(item.get("event_id", "")) == requested_event_id
-            for item in snapshot
-        )
+        event_available = requested_event_id in self._observed_internal_events
         if name in event_tools and not event_available:
             return {
                 "tool": name,
@@ -295,22 +307,55 @@ class CyberDefenseEnvV2:
         if name == "LogQuery":
             return project_public(log_query(snapshot, source=args.get("source"), time=args.get("time")))
         if name == "CrossCheck":
-            requested = [str(item) for item in args.get("sources", []) if str(item)]
-            valid_sources = sorted(set(requested) & set(self._source_priors))
+            evidence_ids = sorted(
+                {str(item) for item in args.get("evidence_ids", []) if str(item)}
+            )
+            if not evidence_ids:
+                return {
+                    "tool": name,
+                    "event_id": requested_event_id,
+                    "status": "invalid_reference",
+                    "error": "crosscheck_requires_evidence_ids",
+                    "evidence_created": False,
+                }
+            valid, reason = self.evidence_store.validate_refs(evidence_ids, time=self.t)
+            if not valid:
+                return {
+                    "tool": name,
+                    "event_id": requested_event_id,
+                    "status": "invalid_reference",
+                    "error": reason,
+                    "evidence_created": False,
+                }
+            compatible, reason = self.evidence_store.refs_support_claim(
+                evidence_ids,
+                event.get("claim_semantics", {}),
+                time=self.t,
+            )
+            if not compatible:
+                return {
+                    "tool": name,
+                    "event_id": requested_event_id,
+                    "status": "incompatible_evidence",
+                    "error": reason,
+                    "evidence_created": False,
+                }
+            event_source = str(event.get("source_id") or event.get("source") or "unknown")
+            derived_roots = self.evidence_store.root_sources(evidence_ids, time=self.t)
+            independent_sources = len(set(derived_roots) - {event_source})
             negative = self._noisy_negative_signal(
                 event,
                 tool=name,
-                independent_sources=len(valid_sources),
+                independent_sources=independent_sources,
             )
-            event_source = str(event.get("source_id") or event.get("source") or "unknown")
             return {
                 "tool": name,
                 "event_id": requested_event_id,
-                "requested_sources": valid_sources,
+                "checked_evidence_ids": evidence_ids,
                 "consistency_signal": "conflict" if negative else "support",
                 "confidence_band": "medium",
                 "verdict": "suspicious" if negative else "supported",
-                "root_source_ids": sorted({event_source, *valid_sources}),
+                "root_source_ids": derived_roots,
             }
         if name == "ProvenanceCheck":
             negative = self._noisy_negative_signal(event, tool=name)
@@ -421,19 +466,20 @@ class CyberDefenseEnvV2:
         if action in HIGH_IMPACT_ACTIONS:
             if self.high_impact_count >= int(constraints.get("max_high_impact_actions", 1)):
                 return False, "high_impact_budget_exhausted", impact
-            assessed = [
-                self.trust_manager.claim_for(str(item.get("event_id", "")))
-                for item in action_packet.get("evidence_assessment", [])
-                if isinstance(item, dict)
-            ]
-            supported = any(
-                item
-                and str(item.get("status")) == "supported"
-                and float(item.get("score", 0.0)) >= 0.80
-                for item in assessed
-            )
-            if not supported:
-                return False, "high_impact_requires_supported_public_evidence", impact
+            if not bool(self.scenario.get("metadata", {}).get("oracle_defender", False)):
+                assessed = [
+                    self.trust_manager.claim_for(str(item.get("event_id", "")))
+                    for item in action_packet.get("evidence_assessment", [])
+                    if isinstance(item, dict)
+                ]
+                supported = any(
+                    item
+                    and str(item.get("status")) == "supported"
+                    and float(item.get("score", 0.0)) >= 0.80
+                    for item in assessed
+                )
+                if not supported:
+                    return False, "high_impact_requires_supported_public_evidence", impact
         return True, "ok", impact
 
     def step(self, action_packet: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], bool]:
@@ -443,46 +489,13 @@ class CyberDefenseEnvV2:
         self.observe()
         # Freeze s_t before any response or persistent probe effect is committed.
         snapshot = self._internal_events()
-        if self.state_layer_enabled:
-            trust_operations = action_packet.get("trust_operations", [])
-            if self.variant.trust_recalibration:
-                trust_events = self.trust_manager.apply(
-                    trust_operations,
-                    evidence_store=self.evidence_store,
-                    time=self.t,
-                )
-            else:
-                trust_events = [
-                    {
-                        "committed": False,
-                        "op": str(operation.get("op", "")),
-                        "reason": "trust_recalibration_disabled_by_ablation",
-                        "time": int(self.t),
-                    }
-                    for operation in trust_operations
-                    if isinstance(operation, dict)
-                ]
-            memory_events = self.memory.apply(
-                action_packet.get("memory_operations", []),
-                evidence_store=self.evidence_store,
-                trust_manager=self.trust_manager,
-                time=self.t,
-            )
-            accepted_memory = self.memory.record_usage(
-                action_packet.get("memory_usage", []),
-                retrieved_ids=self._last_retrieved_ids,
-                time=self.t,
-            )
-        else:
-            trust_events = []
-            memory_events = []
-            accepted_memory = []
-
         proposed_response = (
             copy.deepcopy(action_packet.get("response", {}))
             if isinstance(action_packet.get("response", {}), dict)
             else {}
         )
+        # Response authorization is a pre-state decision. Operations proposed
+        # in this packet commit only after the response has executed.
         action_authorized, authorization_reason, proposed_impact = self._authorize_response(
             proposed_response,
             action_packet,
@@ -521,6 +534,41 @@ class CyberDefenseEnvV2:
         )
         self.attack_mitigated = self.hidden_world.mitigated
 
+        if self.state_layer_enabled:
+            trust_operations = action_packet.get("trust_operations", [])
+            if self.variant.trust_recalibration:
+                trust_events = self.trust_manager.apply(
+                    trust_operations,
+                    evidence_store=self.evidence_store,
+                    time=self.t,
+                )
+            else:
+                trust_events = [
+                    {
+                        "committed": False,
+                        "op": str(operation.get("op", "")),
+                        "reason": "trust_recalibration_disabled_by_ablation",
+                        "time": int(self.t),
+                    }
+                    for operation in trust_operations
+                    if isinstance(operation, dict)
+                ]
+            memory_events = self.memory.apply(
+                action_packet.get("memory_operations", []),
+                evidence_store=self.evidence_store,
+                trust_manager=self.trust_manager,
+                time=self.t,
+            )
+            accepted_memory = self.memory.record_usage(
+                action_packet.get("memory_usage", []),
+                retrieved_ids=self._last_retrieved_ids,
+                time=self.t,
+            )
+        else:
+            trust_events = []
+            memory_events = []
+            accepted_memory = []
+
         # Compute the probe after response submission, but only against the
         # frozen pre-response snapshot. Its evidence is unavailable until t+1.
         tool_result = self._execute_tool(action_packet.get("tool_call", {}), snapshot)
@@ -529,6 +577,11 @@ class CyberDefenseEnvV2:
         parent = self.evidence_store.evidence_for_event(event_id) if event_id else None
         if parent:
             parent_refs.append(parent)
+        parent_refs.extend(
+            str(item)
+            for item in tool_result.get("checked_evidence_ids", []) or []
+            if str(item)
+        )
 
         public_tool_result = project_public(tool_result)
         tool_name = str((action_packet.get("tool_call", {}) or {}).get("name", "None"))

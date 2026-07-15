@@ -7,7 +7,7 @@ AgentGuard-Zero studies autonomous defensive decision-making when observations,
 source trust, and long-term profile memory may be manipulated. It contains an
 abstract safety-bounded simulator, a Deception Curriculum Agent (DCA), a
 Verification Defense Agent (VDA), the frozen-parameter V5-C Evidence-Constrained
-Runtime Governor, and the
+Robust Public-State Governor, and the
 strict DCA-first alternating co-evolution pipeline used by the paper.
 
 The repository intentionally excludes model weights, LoRA checkpoints,
@@ -145,7 +145,7 @@ Use `python scripts/eval_tmcd_systems.py --help` for all system identifiers and
 backend options. API credentials are read only from the environment variable
 named by `--api_key_env`; no credential value is written to source code.
 The evaluation-only controls `agentguard_zero_train_random_k`,
-`agentguard_zero_train_generic_best_of_k`, and
+`agentguard_zero_train_mitigation_best_of_k`, and
 `agentguard_zero_train_soft_v5c` reuse the same trained adapter and candidate
 count; they do not require additional co-evolution training.
 
