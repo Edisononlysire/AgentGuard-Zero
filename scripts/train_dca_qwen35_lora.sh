@@ -83,6 +83,9 @@ RESHARD_AFTER_FORWARD=${AGZ_RESHARD_AFTER_FORWARD:-false}
 HF_FULL_ROLLOUT_REPLICA=${AGZ_HF_FULL_ROLLOUT_REPLICA:-true}
 STOP_ON_COMPLETE_JSON=${AGZ_STOP_ON_COMPLETE_JSON:-true}
 ENABLE_GRADIENT_CHECKPOINTING=${AGZ_ENABLE_GRADIENT_CHECKPOINTING:-true}
+DCA_ROLLOUT_BACKEND=${AGZ_DCA_ROLLOUT_BACKEND:-hf}
+DCA_MAX_NUM_SEQS=${AGZ_DCA_MAX_NUM_SEQS:-4}
+DCA_GPU_MEMORY_UTILIZATION=${AGZ_DCA_GPU_MEMORY_UTILIZATION:-0.35}
 
 mkdir -p "$(dirname "${DCA_FEEDBACK_LOG}")" "${CHECKPOINT_DIR}" "${ROOT}/logs"
 
@@ -118,8 +121,8 @@ for index in "${!GPU_IDS[@]}"; do
     --max-turns "${AGZ_VDA_FEEDBACK_MAX_TURNS:-5}" \
     --max-input-tokens "${AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS:-2048}" \
     --max-new-tokens "${AGZ_VDA_FEEDBACK_MAX_NEW_TOKENS:-384}" \
-    --continuation-prompt-mode "${AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE:-legacy}" \
-    --history-window "${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-0}" \
+    --continuation-prompt-mode "${AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE:-snapshot}" \
+    --history-window "${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-6}" \
     --invalid-action-patience "${AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE:-0}" \
     --attn-implementation "${VDA_FEEDBACK_ATTN_IMPLEMENTATION}" \
     --top-p "${AGZ_VDA_FEEDBACK_TOP_P:-1.0}" \
@@ -177,9 +180,10 @@ echo "DCA GPU layout=${DCA_GPU_LAYOUT} GPUs=${DCA_GPUS}; VDA feedback GPUs=${DCA
 echo "DCA feedback services=${AGZ_VDA_FEEDBACK_URLS}"
 echo "DCA feedback attention=${VDA_FEEDBACK_ATTN_IMPLEMENTATION}"
 echo "DCA parent VDA adapter=${VDA_ADAPTER_PATH:-base}"
-echo "DCA feedback history_window=${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-0}"
+echo "DCA feedback history_window=${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-6}"
 echo "DCA reward fsync_every_batches=${AGZ_DCA_REWARD_FSYNC_EVERY_BATCHES:-1}"
 echo "DCA gradient_checkpointing=${ENABLE_GRADIENT_CHECKPOINTING}"
+echo "DCA rollout backend=${DCA_ROLLOUT_BACKEND} max_num_seqs=${DCA_MAX_NUM_SEQS} gpu_utilization=${DCA_GPU_MEMORY_UTILIZATION}"
 echo "DCA resume_mode=${RESUME_MODE} resume_from_path=${RESUME_FROM_PATH} target_steps=${MAX_STEPS}"
 
 export CUDA_VISIBLE_DEVICES="${DCA_GPUS}"
@@ -237,7 +241,7 @@ PYTHONUNBUFFERED=1 python -s -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.agent.max_turns=0 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}" \
-    actor_rollout_ref.rollout.name=hf \
+    actor_rollout_ref.rollout.name="${DCA_ROLLOUT_BACKEND}" \
     +actor_rollout_ref.rollout.use_full_replica="${HF_FULL_ROLLOUT_REPLICA}" \
     +actor_rollout_ref.rollout.stop_on_complete_json="${STOP_ON_COMPLETE_JSON}" \
     actor_rollout_ref.rollout.temperature="${ROLLOUT_TEMPERATURE}" \
@@ -245,7 +249,8 @@ PYTHONUNBUFFERED=1 python -s -m verl_tool.trainer.main_ppo \
     actor_rollout_ref.rollout.top_k="${ROLLOUT_TOP_K}" \
     actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz="${DYNAMIC_BSZ}" \
-    actor_rollout_ref.rollout.max_num_seqs=4 \
+    actor_rollout_ref.rollout.max_num_seqs="${DCA_MAX_NUM_SEQS}" \
+    actor_rollout_ref.rollout.gpu_memory_utilization="${DCA_GPU_MEMORY_UTILIZATION}" \
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LENGTH}" \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz="${DYNAMIC_BSZ}" \
     actor_rollout_ref.ref.use_torch_compile=False \

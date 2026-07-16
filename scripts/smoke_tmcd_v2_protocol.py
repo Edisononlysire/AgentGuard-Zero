@@ -67,10 +67,20 @@ def make_scenario(task_id: str, index: int) -> dict[str, Any]:
         "experiment_variant": ("full", "append_only_memory", "no_state_layer")[index % 3],
     }
     _rename_sources(scenario, suffix)
+    actionable_event_id = str(
+        scenario.get("oracle", {}).get("first_actionable_event_id", "")
+    )
+    renamed_events: dict[str, str] = {}
     for event_index, event in enumerate(scenario.get("event_schedule", [])):
+        old_event_id = str(event.get("event_id", ""))
         event["event_id"] = f"event-{suffix}-{event_index}"
+        renamed_events[old_event_id] = event["event_id"]
         event["entity_id"] = "database"
         event["claim_semantics"]["entity_id"] = "database"
+    if actionable_event_id in renamed_events:
+        scenario["oracle"]["first_actionable_event_id"] = renamed_events[
+            actionable_event_id
+        ]
 
     if task_id == "T1":
         for key in ("pair_id", "prefix_hash", "divergence_time", "trajectory_type"):
@@ -78,6 +88,12 @@ def make_scenario(task_id: str, index: int) -> dict[str, Any]:
         scenario["event_schedule"][1]["truth_value"] = False
         scenario["event_schedule"][1]["is_fake"] = True
         scenario["event_schedule"][1]["spoofability"] = 0.55 + 0.01 * (index % 20)
+        scenario["oracle"]["actionable_from"] = int(
+            scenario["event_schedule"][1]["time"]
+        )
+        scenario["oracle"]["first_actionable_event_id"] = scenario[
+            "event_schedule"
+        ][1]["event_id"]
     elif task_id == "T2":
         scenario["pair_id"] = f"pair-smoke-{index // 2:03d}"
         scenario["trajectory_type"] = "betrayal"
@@ -93,6 +109,8 @@ def make_scenario(task_id: str, index: int) -> dict[str, Any]:
         second["truth_value"] = False
         second["is_fake"] = True
         scenario["event_schedule"].insert(2, second)
+        scenario["oracle"]["actionable_from"] = int(second["time"])
+        scenario["oracle"]["first_actionable_event_id"] = second["event_id"]
     else:
         for key in ("pair_id", "prefix_hash", "divergence_time", "trajectory_type"):
             scenario.pop(key, None)

@@ -74,6 +74,8 @@ def task_example_v2(task_focus: str) -> dict[str, Any]:
         ambiguous["truth_value"] = False
         ambiguous["is_fake"] = True
         ambiguous["spoofability"] = 0.65
+        scenario["oracle"]["actionable_from"] = int(ambiguous["time"])
+        scenario["oracle"]["first_actionable_event_id"] = ambiguous["event_id"]
     elif task_id == "T3":
         second = copy.deepcopy(scenario["event_schedule"][2])
         second["event_id"] = "event-poison-profile-2"
@@ -84,6 +86,8 @@ def task_example_v2(task_focus: str) -> dict[str, Any]:
         second["truth_value"] = False
         second["is_fake"] = True
         scenario["event_schedule"].insert(2, second)
+        scenario["oracle"]["actionable_from"] = int(second["time"])
+        scenario["oracle"]["first_actionable_event_id"] = second["event_id"]
     elif task_id == "T4":
         pressure = scenario["event_schedule"][2]
         pressure["claim"] = "urgent isolation requested for critical database"
@@ -115,6 +119,7 @@ def build_dca_messages(task_focus: str, nonce: int | None = None) -> list[dict[s
         "Hidden fields are for the simulator only and will be removed by PublicProjector. "
         "network_context.assets must contain the true_attack entry and target, and reachable_edges must connect "
         "entry to target. oracle.true_objective must exactly equal true_attack.objective. "
+        "oracle must include actionable_from and first_actionable_event_id; the named event must occur exactly at actionable_from. "
         "Include at least one post-ambiguity public observation that allows a safe defender to distinguish the state. "
         f"Do not use these OOD holdout families in train/dev/xplay: {forbidden_families}. "
         "For T2, include pair_id, divergence_time, trajectory_type betrayal or legitimate_change, and a prefix_hash placeholder; paired validation will recompute the hash. "

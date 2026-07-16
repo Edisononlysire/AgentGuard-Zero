@@ -108,7 +108,8 @@ def main() -> None:
             "import verl; import verl_tool.trainer.main_ppo; print('verl_tool_import_ok')",
         ]
     )
-    smoke_path = Path(args.output).resolve().with_name("protocol_smoke.json")
+    report_path = Path(args.output).resolve()
+    smoke_path = report_path.with_name(f"{report_path.stem}.protocol_smoke.json")
     smoke_output = _run(
         [
             sys.executable,

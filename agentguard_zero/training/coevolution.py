@@ -518,7 +518,13 @@ class RoundLayout:
     experiment_variant: str = "full"
 
     def __post_init__(self) -> None:
-        if self.artifact_scope not in {"formal", "pilot", "tmcd_v2", "tmcd_v2_pilot"}:
+        if self.artifact_scope not in {
+            "formal",
+            "pilot",
+            "tmcd_v2",
+            "tmcd_v2_pilot",
+            "tmcd_v24",
+        }:
             raise ValueError(f"unsupported artifact scope: {self.artifact_scope}")
         if not self.experiment_variant or "/" in self.experiment_variant or ".." in self.experiment_variant:
             raise ValueError(f"invalid experiment variant: {self.experiment_variant}")
@@ -534,6 +540,7 @@ class RoundLayout:
             "pilot": "co_evolution_pilot",
             "tmcd_v2": "tmcd_v2",
             "tmcd_v2_pilot": "tmcd_v2_pilot",
+            "tmcd_v24": "tmcd_v24",
         }[self.artifact_scope]
         base = self.root / "data" / tree
         if self.experiment_variant != "full":
@@ -544,8 +551,8 @@ class RoundLayout:
         if role not in ROLES:
             raise ValueError(f"unsupported role: {role}")
         index = self.target_round if round_index is None else int(round_index)
-        if self.artifact_scope in {"tmcd_v2", "tmcd_v2_pilot"}:
-            tree = "tmcd_v2" if self.artifact_scope == "tmcd_v2" else "tmcd_v2_pilot"
+        if self.artifact_scope in {"tmcd_v2", "tmcd_v2_pilot", "tmcd_v24"}:
+            tree = self.artifact_scope
             base = self.root / "checkpoints" / tree
             if self.experiment_variant != "full":
                 base = base / "ablations" / self.experiment_variant

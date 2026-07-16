@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from agentguard_zero.schemas.action_schema import ALLOWED_ACTIONS, ALLOWED_TOOLS, OBJECTIVE_KEYS
+from agentguard_zero.world.public_projector import forbidden_public_paths
 
 
 TRUST_OPERATIONS = {"hold", "support", "challenge", "contradict", "recover"}
@@ -79,6 +80,9 @@ def _string_list(value: Any, *, limit: int | None = None) -> bool:
 def validate_action_packet_v4(packet: Any) -> tuple[bool, str]:
     if not isinstance(packet, dict):
         return False, "not_a_dict"
+    forbidden_paths = forbidden_public_paths(packet)
+    if forbidden_paths:
+        return False, f"forbidden_action_field:{forbidden_paths[0]}"
     for key in DEFAULT_ACTION_PACKET_V4:
         if key not in packet:
             return False, f"missing_{key}"

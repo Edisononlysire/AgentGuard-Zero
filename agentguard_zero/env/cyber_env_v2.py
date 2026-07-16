@@ -11,6 +11,10 @@ from agentguard_zero.defender_state.append_only_memory import AppendOnlyProfileM
 from agentguard_zero.defender_state.memory_fsm import EvidenceStateMemory
 from agentguard_zero.defender_state.retriever import retrieve_memory
 from agentguard_zero.defender_state.trust_manager import ContextualTrustManager
+from agentguard_zero.governance.authorization import (
+    ResponseAuthorization,
+    authorize_public_response,
+)
 from agentguard_zero.schemas.action_schema import OBJECTIVE_KEYS
 from agentguard_zero.schemas.observation_schema_v4 import make_observation_v4
 from agentguard_zero.schemas.scenario_schema_v2 import validate_scenario_v2
@@ -249,6 +253,10 @@ class CyberDefenseEnvV2:
             public_assets=self._public_assets(),
             remaining_business_budget=float(constraints.get("business_budget", 5.0)) - self.business_cost,
             verification_remaining=float(constraints.get("verification_budget", 4)) - self.verification_cost,
+            remaining_high_impact_actions=max(
+                0,
+                int(constraints.get("max_high_impact_actions", 1)) - self.high_impact_count,
+            ),
             last_tool_result=self.last_tool_result,
             public_probe_state=self.public_probe_state,
         )
@@ -451,36 +459,27 @@ class CyberDefenseEnvV2:
         self,
         response: dict[str, Any],
         action_packet: dict[str, Any],
-    ) -> tuple[bool, str, dict[str, Any]]:
-        action = str(response.get("action", "Observe"))
-        target = str(response.get("target", "")).strip()
-        impact = estimate_business_impact(response, self._target_criticality(target))
-        if action in TARGETED_RESPONSE_ACTIONS:
-            public_asset_ids = {asset["id"] for asset in self._public_assets()}
-            if not target or target not in public_asset_ids:
-                return False, "invalid_or_missing_public_target", impact
+    ) -> ResponseAuthorization:
         constraints = self.scenario.get("defense_constraints", {})
-        estimated_cost = float(impact.get("estimated_cost", 0.0))
-        if self.business_cost + estimated_cost > float(constraints.get("business_budget", 5.0)) + 1e-9:
-            return False, "business_budget_exceeded", impact
-        if action in HIGH_IMPACT_ACTIONS:
-            if self.high_impact_count >= int(constraints.get("max_high_impact_actions", 1)):
-                return False, "high_impact_budget_exhausted", impact
-            if not bool(self.scenario.get("metadata", {}).get("oracle_defender", False)):
-                assessed = [
-                    self.trust_manager.claim_for(str(item.get("event_id", "")))
-                    for item in action_packet.get("evidence_assessment", [])
-                    if isinstance(item, dict)
-                ]
-                supported = any(
-                    item
-                    and str(item.get("status")) == "supported"
-                    and float(item.get("score", 0.0)) >= 0.80
-                    for item in assessed
-                )
-                if not supported:
-                    return False, "high_impact_requires_supported_public_evidence", impact
-        return True, "ok", impact
+        return authorize_public_response(
+            response=response,
+            evidence_assessment=action_packet.get("evidence_assessment", []),
+            trust_snapshot=self.trust_manager.public_snapshot(),
+            evidence_snapshot=self.evidence_store.public_snapshot(time=self.t),
+            public_assets=self._public_assets(),
+            business_state={
+                "remaining_business_budget": (
+                    float(constraints.get("business_budget", 5.0)) - self.business_cost
+                ),
+                "remaining_high_impact_actions": (
+                    int(constraints.get("max_high_impact_actions", 1))
+                    - self.high_impact_count
+                ),
+            },
+            oracle_override=bool(
+                self.scenario.get("metadata", {}).get("oracle_defender", False)
+            ),
+        )
 
     def step(self, action_packet: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], bool]:
         action_packet = action_packet if isinstance(action_packet, dict) else {}
@@ -496,10 +495,12 @@ class CyberDefenseEnvV2:
         )
         # Response authorization is a pre-state decision. Operations proposed
         # in this packet commit only after the response has executed.
-        action_authorized, authorization_reason, proposed_impact = self._authorize_response(
+        authorization = self._authorize_response(
             proposed_response,
             action_packet,
         )
+        action_authorized = authorization.allowed
+        authorization_reason = authorization.reason
         executed_response = (
             proposed_response
             if action_authorized
@@ -602,7 +603,10 @@ class CyberDefenseEnvV2:
             }
         public_step = {
             "time": self.t,
-            "action_packet": copy.deepcopy(action_packet),
+            # The schema layer rejects forbidden fields. Project again here so
+            # a direct environment caller can never turn malformed model data
+            # into a public-state leak or a rollout-server 500 response.
+            "action_packet": project_public(action_packet),
             "trust_events": trust_events,
             "memory_events": memory_events,
             "accepted_memory_ids": accepted_memory,
@@ -616,8 +620,9 @@ class CyberDefenseEnvV2:
                 "blocked": not action_authorized,
                 "authorized": action_authorized,
                 "authorization_reason": authorization_reason,
-                "proposed_business_cost": float(proposed_impact.get("estimated_cost", 0.0)),
+                "proposed_business_cost": float(authorization.estimated_cost),
                 "business_cost": cost,
+                "authorization_evidence_ids": list(authorization.evidence_ids),
             },
             "tool_result": copy.deepcopy(self.last_tool_result),
         }

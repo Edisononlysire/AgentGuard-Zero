@@ -14,6 +14,7 @@ import copy
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -104,6 +105,7 @@ class TrajectoryState:
     final_score: dict[str, Any] | None = None
     presented_evidence_ids: set[str] = field(default_factory=set)
     last_defender_state: dict[str, Any] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 class Level1RolloutStore:
@@ -112,12 +114,16 @@ class Level1RolloutStore:
         invalid_penalty: float = 0.5,
         max_states: int = 4096,
         defender_checkpoint_interval: int = 8,
+        max_parallel_trajectories: int = 8,
     ):
         self.invalid_penalty = invalid_penalty
         self.max_states = max_states
         if defender_checkpoint_interval <= 0:
             raise ValueError("defender checkpoint interval must be positive")
         self.defender_checkpoint_interval = defender_checkpoint_interval
+        if max_parallel_trajectories <= 0:
+            raise ValueError("max_parallel_trajectories must be positive")
+        self.max_parallel_trajectories = int(max_parallel_trajectories)
         self._lock = threading.Lock()
         self._states: dict[str, TrajectoryState] = {}
 
@@ -136,10 +142,7 @@ class Level1RolloutStore:
         is_last_step = _as_list(payload.get("is_last_step"), n, False)
         extra_fields = _as_list(payload.get("extra_fields"), n, {})
 
-        observations: list[dict[str, Any]] = []
-        dones: list[int] = []
-        valids: list[int] = []
-
+        grouped: dict[str, list[tuple[int, TrajectoryState, str, bool, bool]]] = {}
         with self._lock:
             for idx in range(n):
                 extra = extra_fields[idx] if isinstance(extra_fields[idx], dict) else {}
@@ -147,16 +150,54 @@ class Level1RolloutStore:
                 action = actions[idx]
                 action_text = action if isinstance(action, str) else _json_dumps(action)
                 state = self._get_or_create_state(trajectory_id, extra)
-                obs, done, valid = self._step_state(
-                    state=state,
-                    action_text=action_text,
-                    finish=bool(finish[idx]),
-                    is_last_step=bool(is_last_step[idx]),
+                grouped.setdefault(trajectory_id, []).append(
+                    (
+                        idx,
+                        state,
+                        action_text,
+                        bool(finish[idx]),
+                        bool(is_last_step[idx]),
+                    )
                 )
-                observations.append(obs)
-                dones.append(1 if done else 0)
-                valids.append(1 if valid else 0)
 
+        def process_group(
+            entries: list[tuple[int, TrajectoryState, str, bool, bool]],
+        ) -> list[tuple[int, dict[str, Any], bool, bool]]:
+            results: list[tuple[int, dict[str, Any], bool, bool]] = []
+            state = entries[0][1]
+            with state.lock:
+                for idx, _, action_text, finish_flag, last_flag in entries:
+                    obs, done, valid = self._step_state(
+                        state=state,
+                        action_text=action_text,
+                        finish=finish_flag,
+                        is_last_step=last_flag,
+                    )
+                    results.append((idx, obs, done, valid))
+            return results
+
+        ordered: list[tuple[dict[str, Any], bool, bool] | None] = [None] * n
+        groups = list(grouped.values())
+        if len(groups) <= 1:
+            completed_groups = [process_group(group) for group in groups]
+        else:
+            workers = min(self.max_parallel_trajectories, len(groups))
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="agz-trajectory",
+            ) as executor:
+                completed_groups = list(executor.map(process_group, groups))
+        for completed in completed_groups:
+            for idx, obs, done, valid in completed:
+                ordered[idx] = (obs, done, valid)
+
+        if any(item is None for item in ordered):
+            raise RuntimeError("rollout batch did not produce one result per input")
+        observations = [item[0] for item in ordered if item is not None]
+        dones = [1 if item[1] else 0 for item in ordered if item is not None]
+        valids = [1 if item[2] else 0 for item in ordered if item is not None]
+
+        with self._lock:
             self._trim_completed()
 
         return {"observations": observations, "dones": dones, "valids": valids}
@@ -469,6 +510,8 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=30150)
     parser.add_argument("--invalid-penalty", type=float, default=0.5)
+    parser.add_argument("--max-states", type=int, default=512)
+    parser.add_argument("--max-parallel-trajectories", type=int, default=8)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -477,7 +520,11 @@ def main() -> None:
         run_self_test()
         return
 
-    store = Level1RolloutStore(invalid_penalty=args.invalid_penalty)
+    store = Level1RolloutStore(
+        invalid_penalty=args.invalid_penalty,
+        max_states=args.max_states,
+        max_parallel_trajectories=args.max_parallel_trajectories,
+    )
     server = Level1HTTPServer((args.host, args.port), Handler, store)
     LOGGER.info("Level-1 rollout server listening on http://%s:%s/get_observation", args.host, args.port)
     try:

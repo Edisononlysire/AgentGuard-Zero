@@ -31,6 +31,15 @@ VERIFY_TOOLS = {
 } | ACTIVE_PROBE_TOOLS
 
 
+def _formal_trajectory_reward_required() -> bool:
+    return os.environ.get("AGZ_REQUIRE_TRAJECTORY_REWARD", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _load_scenario(raw: str) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return raw
@@ -162,6 +171,11 @@ def score_vda_prediction_v2_fallback(predict: str) -> Dict[str, float]:
     server. This path deliberately avoids per-step hidden-truth shaping.
     """
 
+    if _formal_trajectory_reward_required():
+        raise RuntimeError(
+            "TMCD formal training requires terminal trajectory reward; fallback is disabled"
+        )
+
     packet, ok, _message = parse_action_json_v4(predict)
     if not ok:
         return {
@@ -194,6 +208,8 @@ def _score_one(predict: str, ground_truth: str) -> Dict[str, float]:
         score["score"] = score["overall"]
         return score
     except Exception:
+        if _formal_trajectory_reward_required():
+            raise
         return {
             "score": -1.0,
             "overall": -1.0,
@@ -223,6 +239,8 @@ def compute_score(
         try:
             scores.append(_score_one(predict, gt))
         except Exception:
+            if _formal_trajectory_reward_required():
+                raise
             scores.append({
                 "score": -1.0,
                 "overall": -1.0,

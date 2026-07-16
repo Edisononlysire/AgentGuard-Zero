@@ -273,7 +273,10 @@ class FeedbackEngine:
     def _ensure_backend(self) -> HFBackend:
         if self.backend is None:
             self.backend = HFBackend(self.args)
-            self.backend.tokenizer.truncation_side = "left"
+            # Keep role/schema instructions if a debug run exceeds its budget.
+            # Formal runs fail before truncation instead of silently dropping
+            # either instructions or the current public state.
+            self.backend.tokenizer.truncation_side = "right"
         return self.backend
 
     def _activate_backend(self) -> HFBackend:
@@ -294,6 +297,26 @@ class FeedbackEngine:
         backend = self._activate_backend()
         torch = backend.torch
         prompts = [backend.format_prompt(messages) for messages in message_batches]
+        require_preservation = os.environ.get(
+            "AGZ_REQUIRE_INSTRUCTION_PRESERVATION", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if require_preservation:
+            tokenized = backend.tokenizer(
+                prompts,
+                add_special_tokens=False,
+                padding=False,
+                truncation=False,
+            )["input_ids"]
+            oversized = [
+                index
+                for index, token_ids in enumerate(tokenized)
+                if len(token_ids) > self.args.max_input_tokens
+            ]
+            if oversized:
+                raise RuntimeError(
+                    "formal VDA feedback prompt exceeds max_input_tokens; "
+                    f"indices={oversized[:16]} limit={self.args.max_input_tokens}"
+                )
         encoded = backend.tokenizer(
             prompts,
             return_tensors="pt",
@@ -631,13 +654,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--continuation-prompt-mode",
         choices=["legacy", "snapshot"],
-        default="legacy",
+        default=os.environ.get(
+            "AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE", "snapshot"
+        ),
     )
     parser.add_argument(
         "--history-window",
         type=int,
-        default=int(os.environ.get("AGZ_VDA_FEEDBACK_HISTORY_WINDOW", "0")),
-        help="Keep only the latest N compact history summaries; 0 preserves full history.",
+        default=int(os.environ.get("AGZ_VDA_FEEDBACK_HISTORY_WINDOW", "6")),
+        help="Keep only the latest N compact history summaries; formal default is 6.",
     )
     parser.add_argument("--invalid-action-patience", type=int, default=0)
     parser.add_argument(

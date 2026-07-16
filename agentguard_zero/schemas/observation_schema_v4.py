@@ -16,6 +16,7 @@ def make_observation_v4(
     public_assets: list[dict[str, Any]],
     remaining_business_budget: float,
     verification_remaining: float,
+    remaining_high_impact_actions: int,
     last_tool_result: dict[str, Any] | None,
     public_probe_state: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -34,6 +35,7 @@ def make_observation_v4(
             "public_assets": copy.deepcopy(public_assets),
             "remaining_business_budget": float(remaining_business_budget),
             "remaining_verification_budget": float(verification_remaining),
+            "remaining_high_impact_actions": int(remaining_high_impact_actions),
         },
         "last_tool_result": copy.deepcopy(last_tool_result),
     }

@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from agentguard_zero.governance.authorization import authorize_public_response
 from agentguard_zero.schemas.action_schema_v4 import (
     DEFAULT_ACTION_PACKET_V4,
     parse_action_json_v4,
@@ -204,31 +205,24 @@ def _hard_gate(
     if _float(TOOL_COSTS.get(tool, 0.0)) > remaining_verification + 1e-9:
         violations.add("verification_budget_exhausted")
 
-    response = packet.get("response", {}) or {}
-    action = str(response.get("action", "Observe"))
-    target = str(response.get("target", "")).strip()
-    public_assets = {
-        str(asset.get("id", "")): asset
-        for asset in observation.get("defense_context", {}).get("public_assets", []) or []
-        if isinstance(asset, dict) and str(asset.get("id", ""))
-    }
-    if action in TARGETED_RESPONSE_ACTIONS and target not in public_assets:
-        violations.add("invalid_or_missing_public_target")
-    if action in HIGH_IMPACT_ACTIONS:
-        assessed_ids = {
-            str(item.get("event_id", ""))
-            for item in packet.get("evidence_assessment", []) or []
-            if isinstance(item, dict)
-        }
-        supported = any(
-            event_id in assessed_ids
-            and isinstance(claim, dict)
-            and str(claim.get("status")) == "supported"
-            and _float(claim.get("score", 0.0)) >= 0.80
-            for event_id, claim in claims.items()
-        )
-        if not supported:
-            violations.add("high_impact_without_supported_public_evidence")
+    defense_context = observation.get("defense_context", {}) or {}
+    authorization = authorize_public_response(
+        response=packet.get("response", {}) or {},
+        evidence_assessment=packet.get("evidence_assessment", []) or [],
+        trust_snapshot=trust,
+        evidence_snapshot=available.values(),
+        public_assets=defense_context.get("public_assets", []) or [],
+        business_state={
+            "remaining_business_budget": defense_context.get(
+                "remaining_business_budget", float("inf")
+            ),
+            "remaining_high_impact_actions": defense_context.get(
+                "remaining_high_impact_actions"
+            ),
+        },
+    )
+    if not authorization.allowed:
+        violations.add(authorization.reason)
     return not violations, tuple(sorted(violations))
 
 

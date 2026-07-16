@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from agentguard_zero.training.coevolution import (
     LineageError,
+    RoundLayout,
     atomic_write_json,
     canonical_json,
     load_checkpoint_manifest,
@@ -25,38 +26,48 @@ from agentguard_zero.training.coevolution import (
     utc_now,
     validate_round_lineage,
 )
+from agentguard_zero.variants import TRAINING_VARIANTS
 
 
 def audit_lineage(
     root: Path,
     backbone: str,
     artifact_scope: str,
+    experiment_variant: str,
     max_round: int,
     expected_host: str | None = None,
 ) -> dict:
-    checkpoint_root = root / ("checkpoints" if artifact_scope == "formal" else "checkpoints_pilot")
-    data_root = root / "data" / (
-        "co_evolution" if artifact_scope == "formal" else "co_evolution_pilot"
+    base_layout = RoundLayout(
+        root=root,
+        backbone=backbone,
+        source_round=0,
+        artifact_scope=artifact_scope,
+        experiment_variant=experiment_variant,
     )
     role_manifests: dict[str, list[dict]] = {"dca": [], "vda": []}
     for role in ("dca", "vda"):
-        base_path = checkpoint_root / backbone / role / "round_0" / "manifest.json"
+        base_path = base_layout.checkpoint_dir(role, 0) / "manifest.json"
         role_manifests[role].append(
             load_checkpoint_manifest(base_path, role=role, backbone=backbone, round_index=0)
         )
 
     rounds = []
     for round_index in range(1, max_round + 1):
+        layout = RoundLayout(
+            root=root,
+            backbone=backbone,
+            source_round=round_index - 1,
+            artifact_scope=artifact_scope,
+            experiment_variant=experiment_variant,
+        )
         manifests = {}
         manifest_paths = {}
         for role in ("dca", "vda"):
-            path = checkpoint_root / backbone / role / f"round_{round_index}" / "manifest.json"
+            path = layout.checkpoint_dir(role, round_index) / "manifest.json"
             manifest = load_checkpoint_manifest(
                 path, role=role, backbone=backbone, round_index=round_index
             )
-            parent_path = (
-                checkpoint_root / backbone / role / f"round_{round_index - 1}" / "manifest.json"
-            ).resolve()
+            parent_path = (layout.checkpoint_dir(role, round_index - 1) / "manifest.json").resolve()
             if Path(manifest.get("parent_manifest", "")).resolve() != parent_path:
                 raise LineageError(f"{role} round {round_index} parent path mismatch")
             if manifest.get("parent_manifest_sha256") != sha256_file(parent_path):
@@ -78,7 +89,7 @@ def audit_lineage(
         if manifests["dca"].get("adapter_sha256") == manifests["vda"].get("adapter_sha256"):
             raise LineageError(f"round {round_index} DCA/VDA adapters have the same hash")
 
-        round_dir = data_root / backbone / f"round_{round_index}"
+        round_dir = layout.data_dir
         feedback_log = round_dir / "dca_feedback" / "feedback.jsonl"
         feedback_manifest_path = round_dir / "dca_feedback" / "manifest.json"
         pool_manifest_path = round_dir / "vda_pool_manifest.json"
@@ -97,11 +108,7 @@ def audit_lineage(
         )
         feedback_manifest = read_json(feedback_manifest_path)
         expected_parent_paths = {
-            role: checkpoint_root
-            / backbone
-            / role
-            / f"round_{round_index - 1}"
-            / "manifest.json"
+            role: layout.checkpoint_dir(role, round_index - 1) / "manifest.json"
             for role in ("dca", "vda")
         }
         for role in ("dca", "vda"):
@@ -170,6 +177,7 @@ def audit_lineage(
         "audited_at": utc_now(),
         "backbone": backbone,
         "artifact_scope": artifact_scope,
+        "experiment_variant": experiment_variant,
         "max_round": max_round,
         "execution_host_required": expected_host,
         "dca_chain": [manifest["adapter_sha256"] for manifest in role_manifests["dca"]],
@@ -190,7 +198,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=str(ROOT))
     parser.add_argument("--backbone", choices=["qwen3.5-4b", "qwen3.5-9b"], required=True)
-    parser.add_argument("--artifact-scope", choices=["formal", "pilot"], required=True)
+    parser.add_argument(
+        "--artifact-scope",
+        choices=["formal", "pilot", "tmcd_v2", "tmcd_v2_pilot", "tmcd_v24"],
+        required=True,
+    )
+    parser.add_argument(
+        "--experiment-variant",
+        choices=TRAINING_VARIANTS,
+        default="full",
+    )
     parser.add_argument("--max-round", type=int, required=True)
     parser.add_argument(
         "--expected-host",
@@ -202,19 +219,24 @@ def main() -> None:
     if args.max_round <= 0 or args.max_round > 3:
         raise SystemExit("--max-round must be between 1 and 3")
     root = Path(args.root).resolve()
+    output_layout = RoundLayout(
+        root=root,
+        backbone=args.backbone,
+        source_round=args.max_round - 1,
+        artifact_scope=args.artifact_scope,
+        experiment_variant=args.experiment_variant,
+    )
     output = (
         Path(args.output).resolve()
         if args.output
-        else root
-        / "data"
-        / ("co_evolution" if args.artifact_scope == "formal" else "co_evolution_pilot")
-        / args.backbone
+        else output_layout.data_dir.parent
         / f"lineage_audit_round_{args.max_round}.json"
     )
     result = audit_lineage(
         root,
         args.backbone,
         args.artifact_scope,
+        args.experiment_variant,
         args.max_round,
         expected_host=args.expected_host or None,
     )

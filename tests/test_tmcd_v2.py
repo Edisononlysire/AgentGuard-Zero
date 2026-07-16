@@ -4,6 +4,8 @@ import copy
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +17,7 @@ from agentguard_zero.defender_state.retriever import retrieve_memory
 from agentguard_zero.defender_state.trust_manager import ContextualTrustManager
 from agentguard_zero.env.checker import full_check
 from agentguard_zero.env.cyber_env_v2 import CyberDefenseEnvV2
-from agentguard_zero.env.oracle_v2 import score_trajectory_v2
+from agentguard_zero.env.oracle_v2 import _probe_metrics, score_trajectory_v2
 from agentguard_zero.evaluation.rq3_memory import (
     counterfactual_memory_impact,
     memory_lifecycle_metrics,
@@ -79,6 +81,7 @@ from scripts.prune_gate_recovery_checkpoint import prune_gate_recovery
 from scripts.validate_vda_training_log import parse_training_metrics
 from scripts.vda_feedback_server import _generation_messages
 from curriculum.reward_function import dca_online_reward
+from curriculum.reward_function.vda_reward import score_vda_prediction_v2_fallback
 
 
 def _action(**updates):
@@ -96,6 +99,32 @@ def _has_key(value, target: str) -> bool:
 
 
 class TMCDV2IsolationTests(unittest.TestCase):
+    def test_forbidden_nested_action_field_is_invalid_not_server_fatal(self) -> None:
+        scenario = minimal_example_v2()
+        action = _action()
+        action["tool_call"]["metadata"] = {
+            "trigger": "continuation_delta",
+            "cost_validated": True,
+        }
+
+        packet, ok, reason = parse_action_json_v4(json.dumps(action))
+        self.assertFalse(ok)
+        self.assertEqual(packet, DEFAULT_ACTION_PACKET_V4)
+        self.assertIn("forbidden_action_field:$.tool_call.metadata", reason)
+
+        store = Level1RolloutStore()
+        result = store.handle(
+            {
+                "trajectory_ids": ["forbidden-nested-field"],
+                "actions": [json.dumps(action)],
+                "finish": [True],
+                "is_last_step": [False],
+                "extra_fields": [{"scenario": scenario}],
+            }
+        )
+        self.assertEqual(result["valids"], [0])
+        self.assertIn("forbidden_action_field", result["observations"][0]["invalid_reason"])
+
     def test_compact_wire_action_normalizes_to_internal_lists(self) -> None:
         wire = {
             "schema_version": 4,
@@ -1114,6 +1143,32 @@ class TMCDV2ReleaseTests(unittest.TestCase):
         self.assertIn("training framework hash mismatch", preflight_source)
         self.assertIn('"source_trees"', prepare_source)
         self.assertIn("source tree hash mismatch", preflight_source)
+        self.assertIn('f"{report_path.stem}.protocol_smoke.json"', preflight_source)
+
+    def test_v24_formal_jobs_are_node_pinned_and_refuse_overwrite(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        expected = {
+            "tmcd_v24_4b_full_node175.dsub.sh": ("cyclone001-agent-175", "full"),
+            "tmcd_v24_9b_full_node217.dsub.sh": ("cyclone001-agent-217", "full"),
+            "tmcd_v24_4b_append_only_node208.dsub.sh": (
+                "cyclone001-agent-208",
+                "append_only_memory",
+            ),
+        }
+        for name, (node, variant) in expected.items():
+            source = (root / "scripts" / "jobs" / name).read_text(encoding="utf-8")
+            self.assertIn(f"#DSUB -pn {node}", source)
+            self.assertIn('artifact-scope tmcd_v24', source)
+            self.assertIn(f"--experiment-variant {variant}", source)
+            self.assertIn("Refusing to overwrite formal TMCD v2.4 outputs", source)
+            self.assertIn('AGZ_FORMAL_RESUME:-0', source)
+            self.assertIn("--dca-feedback-candidates 4000", source)
+            self.assertIn("--vda-candidates 10000", source)
+            self.assertIn("--vda-train-size 2400", source)
+            self.assertIn("--vda-dev-size 400", source)
+            self.assertIn("--vda-xplay-size 800", source)
+            self.assertIn("AGZ_REQUIRE_TRAJECTORY_REWARD=1", source)
+            self.assertNotIn("select_only", source)
 
     def test_round_runner_invalidates_downstream_pool_and_can_stop_before_vda(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -1130,6 +1185,13 @@ class TMCDV2ReleaseTests(unittest.TestCase):
             "candidate generation signature changed after VDA recovery checkpoints",
             source,
         )
+        dca_env = source.index('"AGZ_REQUIRE_TRAJECTORY_REWARD": "0"')
+        dca_launch = source.index('train_dca_qwen35_lora.sh')
+        vda_env = source.index('"AGZ_REQUIRE_TRAJECTORY_REWARD": "1"')
+        vda_launch = source.index('train_vda_qwen35_lora.sh')
+        self.assertLess(dca_env, dca_launch)
+        self.assertLess(dca_launch, vda_env)
+        self.assertLess(vda_env, vda_launch)
 
 
 class TMCDV2TeacherReviewTests(unittest.TestCase):
@@ -1681,6 +1743,210 @@ class TMCDV2TeacherReviewTests(unittest.TestCase):
 
 
 class TMCDV2PerformanceReviewTests(unittest.TestCase):
+    def test_high_impact_requires_target_relevant_claim(self) -> None:
+        env = CyberDefenseEnvV2(minimal_example_v2())
+        observation = env.observe()
+        event_id = observation["observed_events"][0]["event_id"]
+        env.trust_manager.claim_trust[event_id]["status"] = "supported"
+        env.trust_manager.claim_trust[event_id]["score"] = 0.90
+        env._observation_cache.clear()
+        public_context = {"observation": env.observe()}
+        packet = _action(
+            evidence_assessment=[{"event_id": event_id, "status": "supported"}],
+            response={"tier": "L3", "action": "Isolate", "target": "file_server"},
+        )
+        scored = score_v5c_candidate(public_context, json.dumps(packet))
+        self.assertFalse(scored.admissible)
+        self.assertIn(
+            "high_impact_requires_target_relevant_supported_public_evidence",
+            scored.hard_violations,
+        )
+        env.step(packet)
+        result = env.history[-1]["response_result"]
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["authorization_reason"], scored.hard_violations[0])
+
+    def test_same_root_support_does_not_raise_source_reputation(self) -> None:
+        store = EvidenceStore()
+        claim = {
+            "entity_id": "database",
+            "predicate": "attack_objective",
+            "object": "exfiltration",
+            "scope": "cyber_defense",
+        }
+        evidence_id = store.add_event(
+            {
+                "event_id": "event-a",
+                "source_id": "sensor-A",
+                "verdict": "supported",
+                "claim_semantics": claim,
+            },
+            time=0,
+        )
+        manager = ContextualTrustManager()
+        manager.register_claim(
+            {"event_id": "event-a", "source_id": "sensor-A", "claim_semantics": claim},
+            time=0,
+            public_prior=0.55,
+        )
+        before = manager.source_reputation["sensor-A"]["mean"]
+        event = manager.apply(
+            [
+                {
+                    "op": "support",
+                    "source_id": "sensor-A",
+                    "event_id": "event-a",
+                    "evidence_refs": [evidence_id],
+                }
+            ],
+            evidence_store=store,
+            time=0,
+        )[0]
+        self.assertTrue(event["committed"])
+        self.assertFalse(event["source_reputation_updated"])
+        self.assertEqual(manager.source_reputation["sensor-A"]["mean"], before)
+        self.assertGreater(manager.claim_for("event-a")["score"], before)
+
+    def test_probe_followed_by_unrelated_action_is_not_useful(self) -> None:
+        store = EvidenceStore()
+        probe_evidence = store.add_tool_result(
+            {"tool": "SourceChallenge", "active_probe": True, "probe_id": "probe-a"},
+            time=-1,
+        )
+        env = SimpleNamespace(
+            t=2,
+            evidence_store=store,
+            history=[
+                {
+                    "tool_result": {
+                        "active_probe": True,
+                        "probe_id": "probe-a",
+                        "evidence_id": probe_evidence,
+                    }
+                },
+                {
+                    "trust_events": [],
+                    "memory_events": [],
+                    "response_result": {
+                        "executed_action": "LimitSession",
+                        "authorization_evidence_ids": [],
+                    },
+                },
+            ],
+        )
+        count, useful, probe_yield, availability, state_updates, action_revisions = (
+            _probe_metrics(env)
+        )
+        self.assertEqual((count, useful, state_updates, action_revisions), (1, 0, 0, 0))
+        self.assertEqual(probe_yield, 0.0)
+        self.assertEqual(availability, 1.0)
+
+    def test_first_actionable_time_ignores_honest_prefix(self) -> None:
+        env = CyberDefenseEnvV2(minimal_example_v2(), max_steps=6)
+        env.observe()
+        score = score_trajectory_v2(env)
+        self.assertEqual(score["first_actionable_time"], 2)
+        self.assertEqual(score["decision_delay_steps"], 4)
+
+    def test_formal_mode_rejects_missing_trajectory_reward(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"AGZ_REQUIRE_TRAJECTORY_REWARD": "1"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "terminal trajectory reward"):
+                score_vda_prediction_v2_fallback(json.dumps(DEFAULT_ACTION_PACKET_V4))
+
+    def test_feedback_prompt_keeps_instruction_at_turn_16(self) -> None:
+        state = {
+            "initial_messages": [
+                {"role": "system", "content": "SYSTEM ROLE; strict JSON schema required"}
+            ],
+            "instruction_messages": [
+                {"role": "system", "content": "SYSTEM ROLE; strict JSON schema required"}
+            ],
+            "continuation_prompt_mode": "snapshot",
+            "history": [{"t": index, "decision": {"action": "Observe"}} for index in range(16)],
+            "history_window": 6,
+            "public_context": {"observation": {"time": 16}},
+        }
+        messages = _generation_messages(state)
+        self.assertIn("SYSTEM ROLE", messages[0]["content"])
+        self.assertIn("strict JSON schema", messages[0]["content"])
+        self.assertIn('"history_steps_total":16', messages[-1]["content"])
+
+    def test_rollout_store_parallelizes_distinct_trajectory_ids(self) -> None:
+        store = Level1RolloutStore(max_parallel_trajectories=2)
+        original = store._step_state
+        counter_lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        def measured(*args, **kwargs):
+            nonlocal active, peak
+            with counter_lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.03)
+            try:
+                return original(*args, **kwargs)
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        scenario = minimal_example_v2()
+        with mock.patch.object(store, "_step_state", side_effect=measured):
+            result = store.handle(
+                {
+                    "trajectory_ids": ["parallel-a", "parallel-b"],
+                    "actions": [json.dumps(DEFAULT_ACTION_PACKET_V4)] * 2,
+                    "finish": [False, False],
+                    "is_last_step": [False, False],
+                    "extra_fields": [
+                        {"scenario": copy.deepcopy(scenario), "max_env_steps": 4},
+                        {"scenario": copy.deepcopy(scenario), "max_env_steps": 4},
+                    ],
+                }
+            )
+        self.assertEqual(result["valids"], [1, 1])
+        self.assertEqual(peak, 2)
+
+    def test_rollout_store_serializes_same_trajectory_id(self) -> None:
+        store = Level1RolloutStore(max_parallel_trajectories=4)
+        original = store._step_state
+        counter_lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        def measured(*args, **kwargs):
+            nonlocal active, peak
+            with counter_lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            try:
+                return original(*args, **kwargs)
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        scenario = minimal_example_v2()
+        with mock.patch.object(store, "_step_state", side_effect=measured):
+            result = store.handle(
+                {
+                    "trajectory_ids": ["serial-a", "serial-a"],
+                    "actions": [json.dumps(DEFAULT_ACTION_PACKET_V4)] * 2,
+                    "finish": [False, False],
+                    "is_last_step": [False, False],
+                    "extra_fields": [
+                        {"scenario": scenario, "max_env_steps": 4},
+                        {"scenario": scenario, "max_env_steps": 4},
+                    ],
+                }
+            )
+        self.assertEqual(result["valids"], [1, 1])
+        self.assertEqual(peak, 1)
+
     def test_feedback_history_window_is_explicit_and_bounded(self) -> None:
         state = {
             "initial_messages": [{"role": "system", "content": "system"}],
@@ -1749,6 +2015,8 @@ class TMCDV2PerformanceReviewTests(unittest.TestCase):
                 source,
             )
             self.assertIn("export AGZ_DCA_REWARD_FSYNC_EVERY_BATCHES=8", source)
+            self.assertIn("export AGZ_REQUIRE_TRAJECTORY_REWARD=1", source)
+            self.assertIn("export AGZ_VDA_FEEDBACK_HISTORY_WINDOW=6", source)
             self.assertIn("env | grep '^AGZ_'", source)
             self.assertIn("=<redacted>", source)
 

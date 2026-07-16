@@ -76,6 +76,7 @@ ROLLOUT_TEMPERATURE=${AGZ_ROLLOUT_TEMPERATURE:-0.7}
 ROLLOUT_TOP_P=${AGZ_ROLLOUT_TOP_P:-1.0}
 ROLLOUT_TOP_K=${AGZ_ROLLOUT_TOP_K:-0}
 BATCH_SIZE=${AGZ_BATCH_SIZE:-1}
+GEN_BATCH_SIZE=${AGZ_GEN_BATCH_SIZE:-${BATCH_SIZE}}
 DATA_SHUFFLE=${AGZ_DATA_SHUFFLE:-true}
 PPO_MINI_BATCH_SIZE=${AGZ_PPO_MINI_BATCH_SIZE:-1}
 MAX_PROMPT_LENGTH=${AGZ_MAX_PROMPT_LENGTH:-4096}
@@ -116,6 +117,8 @@ RESHARD_AFTER_FORWARD=${AGZ_RESHARD_AFTER_FORWARD:-false}
 HF_FULL_ROLLOUT_REPLICA=${AGZ_HF_FULL_ROLLOUT_REPLICA:-true}
 STOP_ON_COMPLETE_JSON=${AGZ_STOP_ON_COMPLETE_JSON:-true}
 ENABLE_GRADIENT_CHECKPOINTING=${AGZ_ENABLE_GRADIENT_CHECKPOINTING:-true}
+ROLLOUT_SERVER_MAX_PARALLEL_TRAJECTORIES=${AGZ_ROLLOUT_SERVER_MAX_PARALLEL_TRAJECTORIES:-8}
+ROLLOUT_SERVER_MAX_STATES=${AGZ_ROLLOUT_SERVER_MAX_STATES:-512}
 
 export CUDA_VISIBLE_DEVICES
 export VERL_RUN_ID="${RUN_NAME}"
@@ -134,6 +137,7 @@ echo "Running host=$(hostname)"
 echo "Using CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "Using actor fsdp model dtype=${ACTOR_MODEL_DTYPE}"
 echo "Using rollout backend=${ROLLOUT_BACKEND}"
+echo "Using train batch_size=${BATCH_SIZE} generation batch_size=${GEN_BATCH_SIZE}"
 echo "Using actor cpu_offload=${ACTOR_CPU_OFFLOAD}"
 echo "Using actor param_offload=${ACTOR_PARAM_OFFLOAD}"
 echo "Using actor optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD}"
@@ -148,6 +152,7 @@ echo "Using LoRA target_modules=${LORA_TARGET_MODULES}"
 echo "Using torch compile=${USE_TORCH_COMPILE}"
 echo "Using gradient checkpointing=${ENABLE_GRADIENT_CHECKPOINTING}"
 echo "Using agent num_workers=${AGENT_NUM_WORKERS}"
+echo "Using rollout server max_parallel_trajectories=${ROLLOUT_SERVER_MAX_PARALLEL_TRAJECTORIES}"
 echo "Using tool server mode=${TOOL_SERVER_MODE}"
 echo "Using agent max_turns=${AGENT_MAX_TURNS}"
 echo "Using agent lengths: start=${MAX_PROMPT_LENGTH}, action=${MAX_ACTION_LENGTH}, obs=${MAX_OBS_LENGTH}, model=${MAX_MODEL_LENGTH}"
@@ -187,8 +192,13 @@ PY
   TOOL_SERVER_URL="http://${TOOL_SERVER_HOST}:${TOOL_SERVER_PORT}/get_observation"
   if [[ "${TOOL_SERVER_MODE}" == "smoke" ]]; then
     TOOL_SERVER_SCRIPT="${ROOT}/scripts/vda_smoke_tool_server.py"
+    TOOL_SERVER_EXTRA_ARGS=()
   elif [[ "${TOOL_SERVER_MODE}" == "level1" ]]; then
     TOOL_SERVER_SCRIPT="${ROOT}/scripts/level1_rollout_server.py"
+    TOOL_SERVER_EXTRA_ARGS=(
+      --max-parallel-trajectories "${ROLLOUT_SERVER_MAX_PARALLEL_TRAJECTORIES}"
+      --max-states "${ROLLOUT_SERVER_MAX_STATES}"
+    )
   else
     echo "Unsupported AGZ_TOOL_SERVER_MODE=${TOOL_SERVER_MODE}; expected smoke or level1." >&2
     exit 44
@@ -196,6 +206,7 @@ PY
   python -s "${TOOL_SERVER_SCRIPT}" \
     --host "${TOOL_SERVER_HOST}" \
     --port "${TOOL_SERVER_PORT}" \
+    "${TOOL_SERVER_EXTRA_ARGS[@]}" \
     > "${ROOT}/logs/${RUN_NAME}_tool_server.log" 2>&1 &
   TOOL_SERVER_PID=$!
 
@@ -263,7 +274,7 @@ PYTHONUNBUFFERED=1 python -s -m verl_tool.trainer.main_ppo \
     data.prompt_key=problem \
     data.train_batch_size="${BATCH_SIZE}" \
     data.val_batch_size="${BATCH_SIZE}" \
-    data.gen_batch_size="${BATCH_SIZE}" \
+    data.gen_batch_size="${GEN_BATCH_SIZE}" \
     data.shuffle="${DATA_SHUFFLE}" \
     data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
     data.max_response_length="${MAX_RESPONSE_LENGTH}" \

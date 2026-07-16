@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", default="")
     parser.add_argument(
         "--artifact-scope",
-        choices=["formal", "pilot", "tmcd_v2", "tmcd_v2_pilot"],
+        choices=["formal", "pilot", "tmcd_v2", "tmcd_v2_pilot", "tmcd_v24"],
         default="tmcd_v2",
     )
     parser.add_argument("--allocated-gpus", default=os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3"))

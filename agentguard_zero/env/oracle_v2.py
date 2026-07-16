@@ -26,7 +26,11 @@ def _top_belief(history: list[dict[str, Any]]) -> str:
     return max(belief, key=lambda key: float(belief.get(key, 0.0))) if belief else "unknown"
 
 
-def _probe_metrics(env: Any, *, horizon: int = 2) -> tuple[int, int, float, float]:
+def _probe_metrics(
+    env: Any,
+    *,
+    horizon: int = 2,
+) -> tuple[int, int, float, float, int, int]:
     probe_rows = [
         (index, step)
         for index, step in enumerate(env.history)
@@ -34,16 +38,25 @@ def _probe_metrics(env: Any, *, horizon: int = 2) -> tuple[int, int, float, floa
     ]
     available = 0
     useful = 0
-    resolved_probe_ids = {
-        str(item.get("probe_id", ""))
-        for item in getattr(env, "public_probe_state", [])
-        if item.get("status") == "resolved"
-    }
+    grounded_state_updates = 0
+    grounded_action_revisions = 0
+    evidence_records = env.evidence_store.available_records(time=getattr(env, "t", 0))
     for index, step in probe_rows:
         result = step.get("tool_result", {}) or {}
         evidence_id = str(result.get("evidence_id", ""))
-        available += int(bool(evidence_id))
-        corrected = bool(str(result.get("probe_id", "")) in resolved_probe_ids)
+        probe_id = str(result.get("probe_id", ""))
+        related_evidence_ids = {evidence_id} if evidence_id else set()
+        if probe_id:
+            related_evidence_ids.update(
+                str(record.get("evidence_id", ""))
+                for record in evidence_records
+                if str((record.get("public_payload", {}) or {}).get("probe_id", ""))
+                == probe_id
+                and str(record.get("evidence_id", ""))
+            )
+        available += int(bool(related_evidence_ids))
+        state_updated = False
+        action_revised = False
         for followup in env.history[index + 1 : index + 1 + max(1, int(horizon))]:
             state_events = [
                 event
@@ -51,22 +64,34 @@ def _probe_metrics(env: Any, *, horizon: int = 2) -> tuple[int, int, float, floa
                 for event in followup.get(key, []) or []
                 if isinstance(event, dict)
             ]
-            if evidence_id and any(
+            if related_evidence_ids and any(
                 event.get("committed", False)
-                and evidence_id in set(event.get("evidence_refs", []) or [])
+                and bool(
+                    related_evidence_ids
+                    & {str(item) for item in event.get("evidence_refs", []) or []}
+                )
                 for event in state_events
             ):
-                corrected = True
+                state_updated = True
             response = followup.get("response_result", {}) or {}
-            if str(response.get("executed_action", "Observe")) != "Observe":
-                corrected = True
-        useful += int(corrected)
+            authorization_refs = {
+                str(item)
+                for item in response.get("authorization_evidence_ids", []) or []
+                if str(item)
+            }
+            if bool(related_evidence_ids & authorization_refs):
+                action_revised = True
+        grounded_state_updates += int(state_updated)
+        grounded_action_revisions += int(action_revised)
+        useful += int(state_updated or action_revised)
     count = len(probe_rows)
     return (
         count,
         useful,
         useful / max(1, count),
         available / max(1, count),
+        grounded_state_updates,
+        grounded_action_revisions,
     )
 
 
@@ -99,6 +124,30 @@ def _response_safety_metrics(env: Any) -> tuple[float, float, int]:
     )
 
 
+def _first_actionable_time(env: Any) -> int:
+    scenario = env.scenario
+    oracle = scenario.get("oracle", {}) or {}
+    explicit = oracle.get("actionable_from", scenario.get("actionable_from"))
+    if explicit is not None:
+        return max(0, int(explicit))
+
+    first_event_id = str(oracle.get("first_actionable_event_id", ""))
+    if first_event_id:
+        for event in scenario.get("event_schedule", []) or []:
+            if str(event.get("event_id", "")) == first_event_id:
+                return max(0, int(event.get("time", 0)))
+
+    if str(scenario.get("scenario_family", "")) == "trust_betrayal":
+        return max(0, int(scenario.get("divergence_time", 0)))
+
+    event_times = [
+        int(event.get("time", 0))
+        for event in scenario.get("event_schedule", []) or []
+        if isinstance(event, dict)
+    ]
+    return min(event_times, default=0)
+
+
 def score_trajectory_v2(env: Any) -> dict[str, Any]:
     variant = experiment_variant(getattr(env, "experiment_variant", "full"))
     memory = memory_lifecycle_metrics(env)
@@ -128,11 +177,17 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
         )
         for step in env.history
     )
-    active_probe_count, useful_probe_count, probe_yield, probe_result_availability = _probe_metrics(env)
+    (
+        active_probe_count,
+        useful_probe_count,
+        probe_yield,
+        probe_result_availability,
+        probe_grounded_state_updates,
+        probe_grounded_action_revisions,
+    ) = _probe_metrics(env)
     normalized_business = float(env.business_cost) / max(1e-6, budget)
     normalized_episode_length = len(env.history) / max(1, env.max_steps)
-    actionable_times = [int(row.get("time", 0)) for row in env.oracle_ledger]
-    first_actionable_time = min(actionable_times, default=0)
+    first_actionable_time = _first_actionable_time(env)
     effective_times = [
         int(row.get("time", 0))
         for row in env.hidden_world.response_history
@@ -185,12 +240,15 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
         "useful_active_probe_count": int(useful_probe_count),
         "probe_yield": float(probe_yield),
         "probe_result_availability_rate": float(probe_result_availability),
+        "probe_grounded_state_updates": int(probe_grounded_state_updates),
+        "probe_grounded_action_revisions": int(probe_grounded_action_revisions),
         "invalid_state_operations": int(invalid_state_ops),
         "unauthorized_high_impact": int(unauthorized_high_impact),
         "business_aware_reward_enabled": bool(variant.business_aware_reward),
         "business_reward_component": float(business_reward),
         "delay": float(delay),
         "decision_delay_steps": int(decision_delay_steps),
+        "first_actionable_time": int(first_actionable_time),
         "time_to_first_effective_mitigation": int(first_effective_time),
         "normalized_episode_length": float(normalized_episode_length),
         "false_containment_rate": float(false_containment_rate),

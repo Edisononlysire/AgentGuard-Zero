@@ -279,7 +279,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--artifact-scope",
-        choices=["formal", "pilot", "tmcd_v2", "tmcd_v2_pilot"],
+        choices=["formal", "pilot", "tmcd_v2", "tmcd_v2_pilot", "tmcd_v24"],
         default="tmcd_v2",
     )
     parser.add_argument("--model-path", default="")
@@ -326,6 +326,19 @@ def main() -> None:
         raise SystemExit("DCA prompt rows must be divisible by DCA batch size")
     if args.vda_train_size % args.vda_batch_size:
         raise SystemExit("VDA train size must be divisible by VDA batch size")
+    vda_generation_batch_size = int(
+        os.environ.get("AGZ_VDA_GENERATION_BATCH_SIZE", str(args.vda_batch_size))
+    )
+    if vda_generation_batch_size <= 0:
+        raise SystemExit("VDA generation batch size must be positive")
+    if args.vda_train_size % vda_generation_batch_size:
+        raise SystemExit(
+            "VDA train size must be divisible by VDA generation batch size"
+        )
+    if vda_generation_batch_size % args.vda_batch_size:
+        raise SystemExit(
+            "VDA generation batch size must be a multiple of the VDA PPO batch size"
+        )
     if args.dca_steps * args.dca_batch_size * args.dca_rollout_n != args.dca_feedback_candidates:
         raise SystemExit(
             "DCA max-step budget must consume exactly the isolated feedback pool: "
@@ -548,6 +561,9 @@ def main() -> None:
                         "AGZ_TRAIN_FILE": str(prompt_path),
                         "AGZ_VAL_FILE": str(prompt_path),
                         "AGZ_DCA_FEEDBACK_LOG": str(feedback_log_path),
+                        # DCA uses dca_online_reward and does not emit the
+                        # Level1 terminal trajectory reward required by VDA.
+                        "AGZ_REQUIRE_TRAJECTORY_REWARD": "0",
                         "AGZ_RUN_NAME": (
                             f"agz_{args.artifact_scope}_{args.experiment_variant}_{args.backbone}_dca_r{target_round}"
                         ),
@@ -680,6 +696,15 @@ def main() -> None:
                     "rollout_temperature": float(os.environ.get("AGZ_ROLLOUT_TEMPERATURE", 0.7)),
                     "rollout_top_p": float(os.environ.get("AGZ_ROLLOUT_TOP_P", 1.0)),
                     "rollout_top_k": int(os.environ.get("AGZ_ROLLOUT_TOP_K", 0)),
+                    "rollout_backend": os.environ.get(
+                        "AGZ_DCA_ROLLOUT_BACKEND", "hf"
+                    ),
+                    "rollout_max_num_seqs": int(
+                        os.environ.get("AGZ_DCA_MAX_NUM_SEQS", "4")
+                    ),
+                    "rollout_gpu_memory_utilization": float(
+                        os.environ.get("AGZ_DCA_GPU_MEMORY_UTILIZATION", "0.45")
+                    ),
                     "vda_feedback_max_turns": int(
                         os.environ.get("AGZ_VDA_FEEDBACK_MAX_TURNS", 5)
                     ),
@@ -687,10 +712,10 @@ def main() -> None:
                         os.environ.get("AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS", 2048)
                     ),
                     "vda_feedback_continuation_prompt_mode": os.environ.get(
-                        "AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE", "legacy"
+                        "AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE", "snapshot"
                     ),
                     "vda_feedback_history_window": int(
-                        os.environ.get("AGZ_VDA_FEEDBACK_HISTORY_WINDOW", "0")
+                        os.environ.get("AGZ_VDA_FEEDBACK_HISTORY_WINDOW", "6")
                     ),
                     "vda_feedback_invalid_action_patience": int(
                         os.environ.get("AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE", 0)
@@ -921,7 +946,7 @@ def main() -> None:
                     "--seed",
                     str(args.seed),
                     "--train-batch-size",
-                    str(args.vda_batch_size),
+                    str(vda_generation_batch_size),
                 ]
             )
             lineage = validate_round_lineage(
@@ -983,7 +1008,8 @@ def main() -> None:
     try:
         if not stage_complete(state_path, stage):
             mark_stage(state_path, stage, "in_progress")
-            vda_round_steps = args.vda_steps or math.ceil(args.vda_train_size / args.vda_batch_size)
+            vda_optimizer_steps = args.vda_steps
+            vda_round_steps = args.vda_train_size // vda_generation_batch_size
             vda_checkpoint_root = vda_target_dir / "trainer"
             resume_mode, resume_path, target_steps, training_done = _resume_plan(
                 role="vda",
@@ -1031,6 +1057,7 @@ def main() -> None:
                         "AGZ_EXPERIMENT_VARIANT": args.experiment_variant,
                         "AGZ_N_GPUS_PER_NODE": str(len(gpu_ids)),
                         "AGZ_BATCH_SIZE": str(args.vda_batch_size),
+                        "AGZ_GEN_BATCH_SIZE": str(vda_generation_batch_size),
                         "AGZ_PPO_MINI_BATCH_SIZE": os.environ.get(
                             "AGZ_VDA_PPO_MINI_BATCH_SIZE",
                             str(args.vda_batch_size),
@@ -1038,6 +1065,9 @@ def main() -> None:
                         "AGZ_ROLLOUT_N": str(args.vda_rollout_n),
                         "AGZ_ADV_ESTIMATOR": "reinforce_plus_plus",
                         "AGZ_TOOL_SERVER_MODE": "level1",
+                        # VDA must fail closed unless every rollout exposes
+                        # the Level1 terminal trajectory reward.
+                        "AGZ_REQUIRE_TRAJECTORY_REWARD": "1",
                         "AGZ_BUILD_SMOKE_DATASET": "0",
                         "AGZ_AGENT_MAX_TURNS": str(args.vda_max_turns),
                         "AGZ_MAX_PROMPT_LENGTH": "2048",
@@ -1134,7 +1164,12 @@ def main() -> None:
                     "rollout_n": args.vda_rollout_n,
                     "advantage_estimator": "reinforce_plus_plus",
                     "batch_size": args.vda_batch_size,
+                    "generation_batch_size": vda_generation_batch_size,
                     "round_steps": vda_round_steps,
+                    "optimizer_steps_per_round": vda_optimizer_steps,
+                    "optimizer_steps_per_generation": (
+                        vda_generation_batch_size // args.vda_batch_size
+                    ),
                     "max_turns": args.vda_max_turns,
                     "max_prompt_length": 2048,
                     "max_trajectory_response_length": vda_trajectory_tokens,
@@ -1161,6 +1196,14 @@ def main() -> None:
                     "agent_num_workers": int(
                         os.environ.get("AGZ_AGENT_NUM_WORKERS", "1")
                     ),
+                    "rollout_server_max_parallel_trajectories": int(
+                        os.environ.get(
+                            "AGZ_ROLLOUT_SERVER_MAX_PARALLEL_TRAJECTORIES", "8"
+                        )
+                    ),
+                    "rollout_server_max_states": int(
+                        os.environ.get("AGZ_ROLLOUT_SERVER_MAX_STATES", "512")
+                    ),
                     "gpu_memory_utilization": float(
                         os.environ.get("AGZ_GPU_MEMORY_UTILIZATION", "0.35")
                     ),
@@ -1185,6 +1228,9 @@ def main() -> None:
                         .lower()
                         in {"1", "true", "yes", "on"}
                     ),
+                    "actor_cpu_offload": False,
+                    "actor_param_offload": False,
+                    "actor_optimizer_offload": False,
                     "lora_rank": 16,
                     "lora_alpha": 32,
                     "learning_rate": 2e-5,
@@ -1276,7 +1322,7 @@ def main() -> None:
         if not stage_complete(state_path, stage):
             mark_stage(state_path, stage, "in_progress")
             reports: dict[str, Any] = {}
-            if args.artifact_scope in {"formal", "tmcd_v2"} and args.source_round > 0:
+            if args.artifact_scope in {"formal", "tmcd_v2", "tmcd_v24"} and args.source_round > 0:
                 reports = {
                     "dca": _prune_parent_recovery_checkpoint(dca_parent, dca_parent_path),
                     "vda": _prune_parent_recovery_checkpoint(vda_parent, vda_parent_path),

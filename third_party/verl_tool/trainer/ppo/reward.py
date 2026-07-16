@@ -200,6 +200,10 @@ def _compute_fallback_reward(data: DataProto, reward_fn):
         reward_tensor = reward_result["reward_tensor"]
         reward_extra_infos_dict = reward_result.get("reward_extra_info", {})
     except Exception as e:
+        if os.environ.get("AGZ_REQUIRE_TRAJECTORY_REWARD", "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }:
+            raise
         print(f"Error in reward_fn: {e}")
         reward_tensor = reward_fn(data)
         reward_extra_infos_dict = {}
@@ -218,6 +222,15 @@ def compute_reward(data: DataProto, reward_fn):
     """
     trajectory_rewards, trajectory_sources = _extract_level1_trajectory_rewards(data)
     has_trajectory_reward = [reward is not None for reward in trajectory_rewards]
+    require_trajectory_reward = os.environ.get(
+        "AGZ_REQUIRE_TRAJECTORY_REWARD", "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if require_trajectory_reward and not all(has_trajectory_reward):
+        missing = [idx for idx, available in enumerate(has_trajectory_reward) if not available]
+        raise RuntimeError(
+            "TMCD formal training is missing terminal trajectory rewards for "
+            f"batch indices {missing[:16]} (missing={len(missing)}, batch={len(missing) + sum(has_trajectory_reward)})"
+        )
 
     if any(has_trajectory_reward):
         fallback_tensor = None

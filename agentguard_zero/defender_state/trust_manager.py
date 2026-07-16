@@ -282,24 +282,50 @@ class ContextualTrustManager:
                 positive += pos
                 negative += neg
 
+            independent_roots = set(
+                evidence_store.root_sources(fresh_refs, time=time)
+            ) - {source_id}
+            independent_verifiers = {
+                str(record.get("source_id", ""))
+                for record in records
+                if str(record.get("source_id", "")).startswith("tool:")
+                and str(record.get("evidence_type", ""))
+                in {
+                    "crosscheck_result",
+                    "provenancecheck_result",
+                    "sourcechallenge_result",
+                    "canaryprobe_result",
+                }
+            }
+            reputation_evidence_available = bool(
+                independent_roots or independent_verifiers
+            )
+            source_reputation_updated = False
+
             allowed = True
             reason = "ok"
             if op == "support":
                 allowed = bool(records and positive > negative)
                 reason = "support_requires_positive_evidence" if not allowed else "ok"
-                if allowed:
+                if allowed and reputation_evidence_available:
                     source["alpha"] += min(2.0, positive)
                     source["support_streak"] += 1
                     source["conflict_streak"] = 0
                     source["last_verified_at"] = int(time)
+                    source_reputation_updated = True
+                elif allowed:
+                    reason = "ok_claim_only_same_root"
             elif op == "contradict":
                 allowed = bool(records and negative > positive)
                 reason = "contradict_requires_negative_evidence" if not allowed else "ok"
-                if allowed:
+                if allowed and reputation_evidence_available:
                     source["beta"] += min(2.0, negative)
                     source["conflict_streak"] += 1
                     source["support_streak"] = 0
                     source["last_conflict_at"] = int(time)
+                    source_reputation_updated = True
+                elif allowed:
+                    reason = "ok_claim_only_same_root"
             elif op == "recover":
                 allowed = evidence_store.independent_count(fresh_refs, time=time) >= 2 and positive > negative
                 reason = "recover_requires_two_independent_supports" if not allowed else "ok"
@@ -307,6 +333,7 @@ class ContextualTrustManager:
                     source["alpha"] += min(2.0, positive)
                     source["recovery_streak"] += 1
                     source["conflict_streak"] = max(0, int(source["conflict_streak"]) - 1)
+                    source_reputation_updated = True
             elif op == "challenge":
                 if event_id and event_id in self.claim_trust:
                     self.claim_trust[event_id]["status"] = "challenged"
@@ -337,6 +364,9 @@ class ContextualTrustManager:
                 "evidence_refs": fresh_refs if op in credibility_ops else refs,
                 "reason": reason,
                 "time": int(time),
+                "source_reputation_updated": bool(source_reputation_updated),
+                "independent_root_source_ids": sorted(independent_roots),
+                "independent_verifier_ids": sorted(independent_verifiers),
             }
             committed.append(event)
             self.events.append(copy.deepcopy(event))

@@ -133,6 +133,8 @@ def minimal_example_v2(*, trajectory_type: str = "betrayal") -> dict[str, Any]:
             "true_objective": "exfiltration",
             "success_condition": "prevent_exfiltration",
             "overresponse_condition": "isolate_database_without_verified_risk",
+            "actionable_from": 2,
+            "first_actionable_event_id": f"event-divergence-{trajectory_type}",
         },
         "metadata": {
             "task_id": "T2",
@@ -235,6 +237,9 @@ def paired_counterpart_v2(scenario: dict[str, Any]) -> dict[str, Any]:
             event["truth_value"] = target_type == "legitimate_change"
             event["is_fake"] = target_type != "legitimate_change"
             event["spoofability"] = 0.25 if target_type == "legitimate_change" else 0.78
+            counterpart.setdefault("oracle", {})[
+                "first_actionable_event_id"
+            ] = event["event_id"]
     metadata = dict(counterpart.get("metadata", {}) or {})
     metadata["trajectory_type"] = target_type
     metadata["paired_counterpart"] = True
@@ -293,6 +298,7 @@ def validate_scenario_v2(scenario: dict[str, Any]) -> tuple[bool, str]:
             if int(segment.get("start_time", -1)) < 0 or int(segment.get("end_time", -1)) < int(segment.get("start_time", 0)):
                 return False, "invalid_behavior_segment"
     event_ids: set[str] = set()
+    event_times: dict[str, int] = {}
     for event in scenario.get("event_schedule", []):
         event_id = str(event.get("event_id", ""))
         if not event_id or event_id in event_ids:
@@ -301,11 +307,21 @@ def validate_scenario_v2(scenario: dict[str, Any]) -> tuple[bool, str]:
         event_time = event.get("time", -1)
         if isinstance(event_time, bool) or not isinstance(event_time, int) or event_time < 0:
             return False, "invalid_event_time"
+        event_times[event_id] = int(event_time)
         if str(event.get("source_id", "")) not in source_ids:
             return False, "event_source_not_profiled"
         semantics = event.get("claim_semantics", {})
         if any(not str(semantics.get(key, "")).strip() for key in ("entity_id", "predicate", "object", "scope")):
             return False, "missing_claim_semantics"
+    oracle = scenario.get("oracle", {}) or {}
+    actionable_from = oracle.get("actionable_from")
+    actionable_event_id = str(oracle.get("first_actionable_event_id", ""))
+    if isinstance(actionable_from, bool) or not isinstance(actionable_from, int) or actionable_from < 0:
+        return False, "invalid_or_missing_actionable_from"
+    if actionable_event_id not in event_times:
+        return False, "invalid_or_missing_first_actionable_event_id"
+    if event_times[actionable_event_id] != actionable_from:
+        return False, "actionable_time_event_mismatch"
     return True, "ok"
 
 

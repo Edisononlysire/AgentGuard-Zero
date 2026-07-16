@@ -125,6 +125,26 @@ class ReleaseIntegrityTests(unittest.TestCase):
         self.assertNotEqual(layout.checkpoint_dir("dca"), layout.checkpoint_dir("vda"))
         self.assertIn("round_2", str(layout.data_dir))
 
+    def test_round_layout_keeps_v24_formal_outputs_isolated(self) -> None:
+        layout = RoundLayout(
+            ROOT,
+            "qwen3.5-4b",
+            source_round=0,
+            artifact_scope="tmcd_v24",
+            experiment_variant="append_only_memory",
+        )
+        self.assertTrue(
+            str(layout.data_dir).endswith(
+                "data/tmcd_v24/ablations/append_only_memory/qwen3.5-4b/round_1"
+            )
+        )
+        self.assertTrue(
+            str(layout.checkpoint_dir("vda")).endswith(
+                "checkpoints/tmcd_v24/ablations/append_only_memory/"
+                "qwen3.5-4b/vda/round_1"
+            )
+        )
+
     def test_orchestrator_orders_dca_update_before_fresh_pool_and_vda(self) -> None:
         source = (SCRIPTS / "run_dca_first_round.py").read_text(encoding="utf-8")
         self.assertLess(source.index('stage = "update_dca"'), source.index('stage = "generate_fresh_vda_candidates"'))
