@@ -24,7 +24,7 @@ TASK_FOCI = (
     "T4 Business-Constrained Overresponse Induction",
 )
 
-DCA_PROMPT_VERSION = 5
+DCA_PROMPT_VERSION = 6
 
 
 FOCUS_REQUIREMENTS = {
@@ -114,6 +114,7 @@ def build_dca_messages(task_focus: str, nonce: int | None = None) -> list[dict[s
         "network_context, true_attack, source_profiles, event_schedule, defense_constraints, oracle, and metadata. "
         "Each source profile contains source_id, public_prior, and a hidden behavior_schedule. Each event contains event_id, time, type, source_id, entity_id, claim, "
         "claim_semantics with entity_id/predicate/object/scope, objective_hint, truth_value, is_fake, and spoofability. "
+        "Raw events must contain only those fields and must never include verdict, consistency, source_reliability, verifier IDs, evidence lineage, or tool-result types. "
         "Hidden fields are for the simulator only and will be removed by PublicProjector. "
         "network_context.assets must contain the true_attack entry and target, and reachable_edges must connect "
         "entry to target. oracle.true_objective must exactly equal true_attack.objective. "

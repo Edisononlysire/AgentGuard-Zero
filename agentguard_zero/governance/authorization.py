@@ -181,7 +181,7 @@ def _graph_link_evidence(
     evidence_by_id: dict[str, dict[str, Any]],
 ) -> str | None:
     for evidence_id, record in evidence_by_id.items():
-        if str(record.get("evidence_type", "")).lower() != "graphquery_result":
+        if str(record.get("evidence_type", "")).lower() != "tool:graphquery":
             continue
         content = record.get("content", {}) or {}
         if not isinstance(content, dict):

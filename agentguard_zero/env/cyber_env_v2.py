@@ -214,7 +214,14 @@ class CyberDefenseEnvV2:
                     copy.deepcopy(internal),
                 )
             public = project_event(internal)
-            evidence_id = self.evidence_store.add_event(public, time=self.t)
+            if internal.get("probe_generated"):
+                evidence_id = self.evidence_store.add_probe_result(
+                    public,
+                    time=self.t,
+                    tool="DecoyProbe",
+                )
+            else:
+                evidence_id = self.evidence_store.add_event(public, time=self.t)
             public["evidence_id"] = evidence_id
             source_id = str(public.get("source_id") or public.get("source") or "unknown")
             self.trust_manager.register_claim(

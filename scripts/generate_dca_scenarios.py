@@ -40,7 +40,7 @@ from agentguard_zero.schemas.scenario_schema_v2 import public_prefix_hash
 from agentguard_zero.variants import TRAINING_VARIANTS, experiment_variant
 
 
-DCA_CANDIDATE_NORMALIZATION_VERSION = 3
+DCA_CANDIDATE_NORMALIZATION_VERSION = 4
 
 
 def _canonicalize_candidate_identity(

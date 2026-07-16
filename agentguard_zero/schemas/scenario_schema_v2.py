@@ -6,7 +6,12 @@ import json
 from typing import Any
 
 from agentguard_zero.schemas.scenario_schema import OBJECTIVES, PHASES
-from agentguard_zero.protocol import PRIVILEGED_METADATA_FIELDS
+from agentguard_zero.protocol import (
+    PRIVILEGED_METADATA_FIELDS,
+    RAW_EVENT_ALLOWED_FIELDS,
+    RAW_EVENT_FORBIDDEN_SIGNAL_FIELDS,
+    RAW_EVENT_RESERVED_TYPES,
+)
 from agentguard_zero.world.public_projector import project_event
 
 
@@ -307,6 +312,25 @@ def validate_scenario_v2(scenario: dict[str, Any]) -> tuple[bool, str]:
     event_ids: set[str] = set()
     event_times: dict[str, int] = {}
     for event in scenario.get("event_schedule", []):
+        if not isinstance(event, dict):
+            return False, "invalid_raw_event"
+        forbidden_signals = sorted(
+            RAW_EVENT_FORBIDDEN_SIGNAL_FIELDS & set(event)
+        )
+        if forbidden_signals:
+            return False, f"tool_signal_in_raw_event:{forbidden_signals[0]}"
+        extra_fields = sorted(set(event) - RAW_EVENT_ALLOWED_FIELDS)
+        if extra_fields:
+            return False, f"forbidden_raw_event_field:{extra_fields[0]}"
+        event_type = str(event.get("type", "")).strip().lower()
+        if not event_type:
+            return False, "missing_raw_event_type"
+        if (
+            event_type.startswith("tool:")
+            or event_type.endswith("_result")
+            or event_type in RAW_EVENT_RESERVED_TYPES
+        ):
+            return False, f"tool_result_type_in_raw_event:{event_type}"
         event_id = str(event.get("event_id", ""))
         if not event_id or event_id in event_ids:
             return False, "invalid_or_duplicate_event"

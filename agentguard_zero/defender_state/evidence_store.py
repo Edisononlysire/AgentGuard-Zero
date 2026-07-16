@@ -5,6 +5,13 @@ import hashlib
 import json
 from typing import Any, Iterable
 
+from agentguard_zero.protocol import (
+    EVIDENCE_ORIGIN_RAW_EVENT,
+    EVIDENCE_ORIGIN_TOOL_GENERATED,
+    RAW_EVENT_ALLOWED_FIELDS,
+    RAW_EVENT_FORBIDDEN_SIGNAL_FIELDS,
+    RAW_EVENT_RESERVED_TYPES,
+)
 from agentguard_zero.world.public_projector import assert_public
 
 
@@ -38,6 +45,7 @@ def _public_record(record: dict[str, Any]) -> dict[str, Any]:
         "event_id": str(record.get("event_id", "")),
         "source_id": str(record.get("source_id", "unknown")),
         "evidence_type": str(record.get("evidence_type", "event")),
+        "evidence_origin": str(record.get("evidence_origin", "unknown")),
         "content": payload,
     }
     parents = copy.deepcopy(record.get("parent_evidence_ids", []))
@@ -58,6 +66,25 @@ class EvidenceStore:
 
     def add_event(self, public_event: dict[str, Any], *, time: int) -> str:
         assert_public(public_event)
+        forbidden_signals = sorted(
+            RAW_EVENT_FORBIDDEN_SIGNAL_FIELDS & set(public_event)
+        )
+        if forbidden_signals:
+            raise ValueError(
+                f"tool_signal_in_raw_event:{forbidden_signals[0]}"
+            )
+        extra_fields = sorted(set(public_event) - RAW_EVENT_ALLOWED_FIELDS)
+        if extra_fields:
+            raise ValueError(f"forbidden_raw_event_field:{extra_fields[0]}")
+        event_type = str(public_event.get("type", "")).strip().lower()
+        if not event_type:
+            raise ValueError("missing_raw_event_type")
+        if (
+            event_type.startswith("tool:")
+            or event_type.endswith("_result")
+            or event_type in RAW_EVENT_RESERVED_TYPES
+        ):
+            raise ValueError(f"tool_result_type_in_raw_event:{event_type}")
         event_id = str(public_event.get("event_id", f"event-{time}"))
         source_id = str(public_event.get("source_id") or public_event.get("source") or "unknown")
         evidence_id = _stable_id("ev", {"event_id": event_id, "time": time, "source": source_id})
@@ -65,7 +92,8 @@ class EvidenceStore:
             "evidence_id": evidence_id,
             "event_id": event_id,
             "source_id": source_id,
-            "evidence_type": str(public_event.get("type", "event")),
+            "evidence_type": f"event:{event_type}",
+            "evidence_origin": EVIDENCE_ORIGIN_RAW_EVENT,
             "public_payload": copy.deepcopy(public_event),
             "parent_evidence_ids": [],
             "root_source_ids": [source_id],
@@ -80,6 +108,51 @@ class EvidenceStore:
         }
         self._records.setdefault(evidence_id, record)
         self._event_index[event_id] = evidence_id
+        return evidence_id
+
+    def add_probe_result(
+        self,
+        public_event: dict[str, Any],
+        *,
+        time: int,
+        tool: str,
+    ) -> str:
+        """Store a delayed environment-generated probe observation."""
+
+        assert_public(public_event)
+        tool_name = str(tool).strip()
+        if not tool_name:
+            raise ValueError("missing_probe_tool")
+        event_id = str(public_event.get("event_id", f"probe-event-{time}"))
+        source_id = str(
+            public_event.get("source_id")
+            or public_event.get("source")
+            or f"tool:{tool_name}"
+        )
+        evidence_id = _stable_id(
+            "tool-event",
+            {
+                "event_id": event_id,
+                "time": int(time),
+                "tool": tool_name,
+                "payload": public_event,
+            },
+        )
+        claim_key = _claim_identity(public_event.get("claim_semantics"))
+        self._records[evidence_id] = {
+            "evidence_id": evidence_id,
+            "event_id": event_id,
+            "source_id": source_id,
+            "evidence_type": f"tool:{tool_name.lower()}",
+            "evidence_origin": EVIDENCE_ORIGIN_TOOL_GENERATED,
+            "public_payload": copy.deepcopy(public_event),
+            "parent_evidence_ids": [],
+            "root_source_ids": [source_id],
+            "claim_keys": [claim_key] if claim_key else [],
+            "created_at": int(time),
+            "available_at": int(time),
+            "integrity_status": "valid",
+        }
         return evidence_id
 
     def add_tool_result(
@@ -114,7 +187,8 @@ class EvidenceStore:
             "evidence_id": evidence_id,
             "event_id": str(public_result.get("event_id", "")),
             "source_id": source_id,
-            "evidence_type": f"{tool.lower()}_result",
+            "evidence_type": f"tool:{tool.lower()}",
+            "evidence_origin": EVIDENCE_ORIGIN_TOOL_GENERATED,
             "public_payload": copy.deepcopy(public_result),
             "parent_evidence_ids": parents,
             "root_source_ids": sorted(roots),

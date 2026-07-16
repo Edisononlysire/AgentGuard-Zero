@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 from typing import Any, Iterable
 
+from agentguard_zero.protocol import RAW_EVENT_FORBIDDEN_SIGNAL_FIELDS
+
 
 FORBIDDEN_PUBLIC_KEYS = frozenset(
     {
@@ -73,6 +75,9 @@ def assert_public(value: Any) -> None:
 
 
 def project_event(internal_event: dict[str, Any]) -> dict[str, Any]:
-    public = project_public(internal_event)
+    public = project_public(
+        internal_event,
+        FORBIDDEN_PUBLIC_KEYS | RAW_EVENT_FORBIDDEN_SIGNAL_FIELDS,
+    )
     assert_public(public)
     return public

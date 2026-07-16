@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from agentguard_zero.protocol import EVIDENCE_ORIGIN_TOOL_GENERATED
+
 
 def _clamp(value: Any, low: float = 0.0, high: float = 1.0) -> float:
     try:
@@ -13,6 +15,14 @@ def _clamp(value: Any, low: float = 0.0, high: float = 1.0) -> float:
 
 def evidence_signal(record: dict[str, Any]) -> tuple[float, float]:
     """Return public positive/negative support carried by one evidence record."""
+
+    evidence_origin = str(record.get("evidence_origin", "")).lower()
+    evidence_type = str(record.get("evidence_type", "")).lower()
+    if (
+        evidence_origin != EVIDENCE_ORIGIN_TOOL_GENERATED
+        or not evidence_type.startswith("tool:")
+    ):
+        return 0.0, 0.0
 
     payload = record.get("public_payload")
     if not isinstance(payload, dict):

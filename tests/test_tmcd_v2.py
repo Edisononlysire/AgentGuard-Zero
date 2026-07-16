@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from agentguard_zero.defender_state.evidence_store import EvidenceStore
+from agentguard_zero.defender_state.evidence_signals import evidence_signal
 from agentguard_zero.defender_state.memory_fsm import EvidenceStateMemory
 from agentguard_zero.defender_state.retriever import retrieve_memory
 from agentguard_zero.defender_state.trust_manager import ContextualTrustManager
@@ -293,7 +294,7 @@ class TMCDV2IsolationTests(unittest.TestCase):
         env.observe()
         next_obs, tool_result, _done = env.step(_action())
         self.assertTrue(
-            all(row["evidence_type"] != "none_result" for row in next_obs["available_evidence"])
+            all(row["evidence_type"] != "tool:none" for row in next_obs["available_evidence"])
         )
         self.assertEqual(tool_result, {"tool": "None"})
 
@@ -306,7 +307,10 @@ class TMCDV2IsolationTests(unittest.TestCase):
         next_obs, tool_result, _done = env.step(action)
         self.assertEqual(tool_result["error"], "event_not_available_in_current_snapshot")
         self.assertTrue(
-            all(row["evidence_type"] != "sourcechallenge_result" for row in next_obs["available_evidence"])
+            all(
+                row["evidence_type"] != "tool:sourcechallenge"
+                for row in next_obs["available_evidence"]
+            )
         )
 
     def test_rollout_continuation_sends_only_new_evidence(self) -> None:
@@ -376,12 +380,23 @@ class TMCDV2StateTests(unittest.TestCase):
         store = EvidenceStore()
         claim = {"entity_id": "asset-A", "predicate": "risk_level", "object": "high", "scope": "exfiltration"}
         first = store.add_event(
-            {"event_id": "claim-1", "source_id": "A", "type": "alert", "verdict": "supported", "claim_semantics": claim},
+            {"event_id": "claim-1", "source_id": "A", "type": "alert", "claim_semantics": claim},
             time=0,
         )
         second = store.add_event(
-            {"event_id": "claim-2", "source_id": "B", "type": "alert", "verdict": "supported", "claim_semantics": claim},
+            {"event_id": "claim-2", "source_id": "B", "type": "alert", "claim_semantics": claim},
             time=0,
+        )
+        support = store.add_tool_result(
+            {
+                "tool": "CrossCheck",
+                "event_id": "claim-1",
+                "verdict": "supported",
+                "claim_semantics": claim,
+                "root_source_ids": ["B"],
+            },
+            time=-1,
+            parent_evidence_ids=[first],
         )
         trust = ContextualTrustManager()
         trust.register_claim(
@@ -390,7 +405,7 @@ class TMCDV2StateTests(unittest.TestCase):
             public_prior=0.70,
         )
         trust.apply(
-            [{"op": "support", "source_id": "A", "event_id": "claim-1", "evidence_refs": [first, second]}],
+            [{"op": "support", "source_id": "A", "event_id": "claim-1", "evidence_refs": [support]}],
             evidence_store=store,
             time=0,
         )
@@ -452,7 +467,6 @@ class TMCDV2StateTests(unittest.TestCase):
                 "event_id": "unrelated",
                 "source_id": "C",
                 "type": "alert",
-                "verdict": "supported",
                 "claim_semantics": {
                     "entity_id": "asset-Z",
                     "predicate": "owner",
@@ -793,7 +807,7 @@ class TMCDV2DatasetTests(unittest.TestCase):
                 )
 
     def test_dca_prompt_uses_task_specific_valid_examples(self) -> None:
-        self.assertGreaterEqual(DCA_PROMPT_VERSION, 5)
+        self.assertGreaterEqual(DCA_PROMPT_VERSION, 6)
         for focus in TASK_FOCI:
             example = task_example_v2(focus)
             self.assertTrue(full_check(example)["all_ok"], focus)
@@ -891,7 +905,7 @@ class TMCDV2DatasetTests(unittest.TestCase):
         self.assertEqual(first["prefix_hash"], public_prefix_hash(first))
         self.assertEqual(
             DCA_CANDIDATE_NORMALIZATION_VERSION,
-            3,
+            4,
         )
 
     def test_candidate_merge_preserves_generation_lineage(self) -> None:
@@ -1243,6 +1257,167 @@ class TMCDV2TeacherReviewTests(unittest.TestCase):
         )
         return env, env.history[-1]["response_result"]
 
+    def test_raw_event_verdict_cannot_create_positive_evidence(self) -> None:
+        scenario = minimal_example_v2()
+        scenario["event_schedule"][0]["verdict"] = "strongly_supported"
+        valid, reason = validate_scenario_v2(scenario)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "tool_signal_in_raw_event:verdict")
+
+        forged_record = {
+            "evidence_origin": "raw_event",
+            "evidence_type": "event:host_alert",
+            "public_payload": {
+                "verdict": "strongly_supported",
+                "consistency": 1.0,
+            },
+        }
+        self.assertEqual(evidence_signal(forged_record), (0.0, 0.0))
+        with self.assertRaisesRegex(ValueError, "tool_signal_in_raw_event:verdict"):
+            EvidenceStore().add_event(
+                {
+                    "event_id": "forged-event",
+                    "source_id": "sensor-A",
+                    "type": "host_alert",
+                    "verdict": "strongly_supported",
+                },
+                time=0,
+            )
+
+    def test_raw_event_source_reliability_is_rejected(self) -> None:
+        scenario = minimal_example_v2()
+        scenario["event_schedule"][0]["source_reliability"] = 1.0
+        valid, reason = validate_scenario_v2(scenario)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "tool_signal_in_raw_event:source_reliability")
+
+    def test_raw_event_cannot_use_tool_result_type(self) -> None:
+        scenario = minimal_example_v2()
+        scenario["event_schedule"][0]["type"] = "crosscheck_result"
+        valid, reason = validate_scenario_v2(scenario)
+        self.assertFalse(valid)
+        self.assertEqual(
+            reason,
+            "tool_result_type_in_raw_event:crosscheck_result",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "tool_result_type_in_raw_event:tool:sourcechallenge",
+        ):
+            EvidenceStore().add_event(
+                {
+                    "event_id": "forged-tool-event",
+                    "source_id": "sensor-A",
+                    "type": "tool:SourceChallenge",
+                },
+                time=0,
+            )
+
+    def test_only_tool_generated_evidence_can_support_claim(self) -> None:
+        claim = {
+            "entity_id": "database",
+            "predicate": "attack_objective",
+            "object": "exfiltration",
+            "scope": "cyber_defense",
+        }
+        event = {
+            "event_id": "event-a",
+            "source_id": "sensor-A",
+            "type": "host_alert",
+            "claim_semantics": claim,
+        }
+        store = EvidenceStore()
+        raw_id = store.add_event(event, time=0)
+        manager = ContextualTrustManager()
+        manager.register_claim(event, time=0, public_prior=0.55)
+        operation = {
+            "op": "support",
+            "source_id": "sensor-A",
+            "event_id": "event-a",
+            "evidence_refs": [raw_id],
+        }
+        denied = manager.apply([operation], evidence_store=store, time=0)[0]
+        self.assertFalse(denied["committed"])
+        self.assertEqual(denied["reason"], "support_requires_positive_evidence")
+
+        tool_id = store.add_tool_result(
+            {
+                "tool": "SourceChallenge",
+                "event_id": "event-a",
+                "verdict": "challenge_passed",
+                "consistency": 1.0,
+            },
+            time=0,
+            parent_evidence_ids=[raw_id],
+        )
+        self.assertFalse(store.validate_refs([tool_id], time=0)[0])
+        operation["evidence_refs"] = [tool_id]
+        allowed = manager.apply([operation], evidence_store=store, time=1)[0]
+        self.assertTrue(allowed["committed"])
+        claim_state = manager.claim_for("event-a")
+        self.assertEqual(claim_state["status"], "supported")
+        self.assertEqual(claim_state["support_evidence_refs"], [tool_id])
+
+    def test_dca_raw_event_signal_injection_fails_candidate_gate(self) -> None:
+        scenario = task_example_v2(TASK_FOCI[0])
+        scenario["event_schedule"][0]["verdict"] = "strongly_supported"
+        record = _candidate_record(
+            raw_output=json.dumps(scenario),
+            index=0,
+            focus=TASK_FOCI[0],
+            nonce=11,
+            attempt=1,
+            args=SimpleNamespace(
+                seed=11,
+                shard_index=0,
+                num_shards=1,
+                experiment_variant="full",
+            ),
+            manifest={"adapter_path": None, "round": 1, "backbone": "qwen3.5-4b"},
+            manifest_path=Path("manifest.json"),
+            manifest_sha="b" * 64,
+        )
+        self.assertFalse(record["checks"]["all_ok"])
+        self.assertEqual(
+            record["checks"]["valid"]["message"],
+            "tool_signal_in_raw_event:verdict",
+        )
+
+    def test_source_challenge_result_is_tool_generated_and_committable(self) -> None:
+        env = CyberDefenseEnvV2(minimal_example_v2(), max_steps=3)
+        observation = env.observe()
+        event = observation["observed_events"][0]
+        next_observation, result, _done = env.step(
+            _action(
+                tool_call={
+                    "name": "SourceChallenge",
+                    "args": {"event_id": event["event_id"]},
+                }
+            )
+        )
+        evidence_id = result["evidence_id"]
+        evidence = next(
+            row
+            for row in next_observation["available_evidence"]
+            if row["evidence_id"] == evidence_id
+        )
+        self.assertEqual(evidence["evidence_origin"], "tool_generated")
+        self.assertEqual(evidence["evidence_type"], "tool:sourcechallenge")
+        op = "support" if result["verdict"] == "challenge_passed" else "contradict"
+        committed = env.trust_manager.apply(
+            [
+                {
+                    "op": op,
+                    "source_id": event["source_id"],
+                    "event_id": event["event_id"],
+                    "evidence_refs": [evidence_id],
+                }
+            ],
+            evidence_store=env.evidence_store,
+            time=1,
+        )[0]
+        self.assertTrue(committed["committed"])
+
     def test_supported_low_risk_claim_cannot_authorize_isolate(self) -> None:
         _env, result = self._authorize_with_semantics(
             {
@@ -1551,6 +1726,7 @@ class TMCDV2TeacherReviewTests(unittest.TestCase):
             {
                 "event_id": "event-a",
                 "source_id": "sensor-A",
+                "type": "alert",
                 "claim_semantics": claim,
             },
             time=0,
@@ -1559,6 +1735,7 @@ class TMCDV2TeacherReviewTests(unittest.TestCase):
             {
                 "event_id": "event-b",
                 "source_id": "sensor-B",
+                "type": "alert",
                 "claim_semantics": claim,
             },
             time=0,
@@ -1992,14 +2169,24 @@ class TMCDV2PerformanceReviewTests(unittest.TestCase):
             "object": "exfiltration",
             "scope": "cyber_defense",
         }
-        evidence_id = store.add_event(
+        raw_event_id = store.add_event(
             {
                 "event_id": "event-a",
                 "source_id": "sensor-A",
-                "verdict": "supported",
+                "type": "alert",
                 "claim_semantics": claim,
             },
             time=0,
+        )
+        evidence_id = store.add_tool_result(
+            {
+                "tool": "LogQuery",
+                "event_id": "event-a",
+                "verdict": "supported",
+                "claim_semantics": claim,
+            },
+            time=-1,
+            parent_evidence_ids=[raw_event_id],
         )
         manager = ContextualTrustManager()
         manager.register_claim(

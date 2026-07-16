@@ -284,10 +284,10 @@ class ContextualTrustManager:
                 if str(record.get("source_id", "")).startswith("tool:")
                 and str(record.get("evidence_type", ""))
                 in {
-                    "crosscheck_result",
-                    "provenancecheck_result",
-                    "sourcechallenge_result",
-                    "canaryprobe_result",
+                    "tool:crosscheck",
+                    "tool:provenancecheck",
+                    "tool:sourcechallenge",
+                    "tool:canaryprobe",
                 }
             }
             reputation_evidence_available = bool(

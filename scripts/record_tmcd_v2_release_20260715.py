@@ -48,9 +48,9 @@ def main() -> None:
         "created_at": utc_now(),
         "release_revision": TMCD_RELEASE_REVISION,
         "reason": (
-            "Close the teacher-reviewed v2.4 protocol with action-semantic response "
-            "authorization, runtime-only oracle privilege, exact task-family lineage, "
-            "and positive support-only authorization evidence."
+            "Close the teacher-reviewed v2.4 protocol by isolating untrusted raw "
+            "events from environment-generated verification evidence and rejecting "
+            "reserved signal fields and tool-result types at the scenario gate."
         ),
         "changed_files": [
             "agentguard_zero/protocol.py",
@@ -108,10 +108,10 @@ def main() -> None:
         "previous_training_framework": previous_framework,
         "training_framework": framework,
         "validation": {
-            "full_unittest_discovery": "110/110 passed",
+            "full_unittest_discovery": "116/116 passed",
             "protocol_smoke": "256 scenarios; T1-T4 64 each; passed",
             "protocol_smoke_digest": "7fb4e0d9fcb24a6ba862e0d19d38b441f749688a8d0f0512e6207521bdaaa870",
-            "formal_pool_status": "all pre-v2.4.1 pools invalidated; v2.4.1 pool must be regenerated",
+            "formal_pool_status": "all pre-v2.4.2 pools invalidated; v2.4.2 pool must be regenerated",
             "legacy_pool_rejection": "enforced by release revision",
         },
     }
