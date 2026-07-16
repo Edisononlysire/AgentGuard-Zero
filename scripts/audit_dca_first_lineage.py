@@ -200,7 +200,14 @@ def main() -> None:
     parser.add_argument("--backbone", choices=["qwen3.5-4b", "qwen3.5-9b"], required=True)
     parser.add_argument(
         "--artifact-scope",
-        choices=["formal", "pilot", "tmcd_v2", "tmcd_v2_pilot", "tmcd_v24"],
+        choices=[
+            "formal",
+            "pilot",
+            "tmcd_v2",
+            "tmcd_v2_pilot",
+            "tmcd_v24",
+            "tmcd_v242",
+        ],
         required=True,
     )
     parser.add_argument(

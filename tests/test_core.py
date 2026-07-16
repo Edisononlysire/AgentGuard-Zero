@@ -145,6 +145,22 @@ class ReleaseIntegrityTests(unittest.TestCase):
             )
         )
 
+    def test_round_layout_keeps_v242_formal_outputs_isolated(self) -> None:
+        layout = RoundLayout(
+            ROOT,
+            "qwen3.5-4b",
+            source_round=0,
+            artifact_scope="tmcd_v242",
+        )
+        self.assertTrue(
+            str(layout.data_dir).endswith("data/tmcd_v242/qwen3.5-4b/round_1")
+        )
+        self.assertTrue(
+            str(layout.checkpoint_dir("vda")).endswith(
+                "checkpoints/tmcd_v242/qwen3.5-4b/vda/round_1"
+            )
+        )
+
     def test_orchestrator_orders_dca_update_before_fresh_pool_and_vda(self) -> None:
         source = (SCRIPTS / "run_dca_first_round.py").read_text(encoding="utf-8")
         self.assertLess(source.index('stage = "update_dca"'), source.index('stage = "generate_fresh_vda_candidates"'))

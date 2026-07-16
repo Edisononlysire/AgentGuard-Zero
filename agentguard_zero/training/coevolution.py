@@ -524,6 +524,7 @@ class RoundLayout:
             "tmcd_v2",
             "tmcd_v2_pilot",
             "tmcd_v24",
+            "tmcd_v242",
         }:
             raise ValueError(f"unsupported artifact scope: {self.artifact_scope}")
         if not self.experiment_variant or "/" in self.experiment_variant or ".." in self.experiment_variant:
@@ -541,6 +542,7 @@ class RoundLayout:
             "tmcd_v2": "tmcd_v2",
             "tmcd_v2_pilot": "tmcd_v2_pilot",
             "tmcd_v24": "tmcd_v24",
+            "tmcd_v242": "tmcd_v242",
         }[self.artifact_scope]
         base = self.root / "data" / tree
         if self.experiment_variant != "full":
@@ -551,7 +553,12 @@ class RoundLayout:
         if role not in ROLES:
             raise ValueError(f"unsupported role: {role}")
         index = self.target_round if round_index is None else int(round_index)
-        if self.artifact_scope in {"tmcd_v2", "tmcd_v2_pilot", "tmcd_v24"}:
+        if self.artifact_scope in {
+            "tmcd_v2",
+            "tmcd_v2_pilot",
+            "tmcd_v24",
+            "tmcd_v242",
+        }:
             tree = self.artifact_scope
             base = self.root / "checkpoints" / tree
             if self.experiment_variant != "full":

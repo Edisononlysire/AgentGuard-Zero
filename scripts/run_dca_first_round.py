@@ -279,7 +279,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--artifact-scope",
-        choices=["formal", "pilot", "tmcd_v2", "tmcd_v2_pilot", "tmcd_v24"],
+        choices=[
+            "formal",
+            "pilot",
+            "tmcd_v2",
+            "tmcd_v2_pilot",
+            "tmcd_v24",
+            "tmcd_v242",
+        ],
         default="tmcd_v2",
     )
     parser.add_argument("--model-path", default="")
@@ -1322,7 +1329,12 @@ def main() -> None:
         if not stage_complete(state_path, stage):
             mark_stage(state_path, stage, "in_progress")
             reports: dict[str, Any] = {}
-            if args.artifact_scope in {"formal", "tmcd_v2", "tmcd_v24"} and args.source_round > 0:
+            if args.artifact_scope in {
+                "formal",
+                "tmcd_v2",
+                "tmcd_v24",
+                "tmcd_v242",
+            } and args.source_round > 0:
                 reports = {
                     "dca": _prune_parent_recovery_checkpoint(dca_parent, dca_parent_path),
                     "vda": _prune_parent_recovery_checkpoint(vda_parent, vda_parent_path),
