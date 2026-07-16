@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from agentguard_zero.schemas.scenario_schema import OBJECTIVES, PHASES
+from agentguard_zero.protocol import PRIVILEGED_METADATA_FIELDS
 from agentguard_zero.world.public_projector import project_event
 
 
@@ -265,6 +266,12 @@ def validate_scenario_v2(scenario: dict[str, Any]) -> tuple[bool, str]:
     for key in required:
         if key not in scenario:
             return False, f"missing_{key}"
+    metadata = scenario.get("metadata", {}) or {}
+    if not isinstance(metadata, dict):
+        return False, "invalid_metadata"
+    privileged = sorted(PRIVILEGED_METADATA_FIELDS & set(metadata))
+    if privileged:
+        return False, f"privileged_metadata_forbidden:{privileged[0]}"
     if scenario.get("distribution") not in DISTRIBUTIONS:
         return False, "invalid_distribution"
     if scenario.get("true_attack", {}).get("objective") not in OBJECTIVES:

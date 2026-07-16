@@ -115,6 +115,7 @@ class Level1RolloutStore:
         max_states: int = 4096,
         defender_checkpoint_interval: int = 8,
         max_parallel_trajectories: int = 8,
+        oracle_mode: bool = False,
     ):
         self.invalid_penalty = invalid_penalty
         self.max_states = max_states
@@ -124,6 +125,7 @@ class Level1RolloutStore:
         if max_parallel_trajectories <= 0:
             raise ValueError("max_parallel_trajectories must be positive")
         self.max_parallel_trajectories = int(max_parallel_trajectories)
+        self.oracle_mode = bool(oracle_mode)
         self._lock = threading.Lock()
         self._states: dict[str, TrajectoryState] = {}
 
@@ -213,7 +215,11 @@ class Level1RolloutStore:
             max_steps_int = int(max_steps) if max_steps is not None else None
         except Exception:
             max_steps_int = None
-        env = instantiate_scenario(scenario, max_steps=max_steps_int)
+        env = instantiate_scenario(
+            scenario,
+            max_steps=max_steps_int,
+            oracle_mode=self.oracle_mode,
+        )
         state = TrajectoryState(trajectory_id=trajectory_id, scenario=scenario, env=env)
         initial_observation = env.observe()
         state.presented_evidence_ids.update(

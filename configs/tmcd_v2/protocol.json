@@ -1,6 +1,6 @@
 {
   "protocol_version": "tmcd-v2",
-  "release_revision": "tmcd-v2.4-20260716",
+  "release_revision": "tmcd-v2.4.1-20260716",
   "schema_version": 4,
   "frozen_at": "2026-07-13T00:00:00Z",
   "update_order": "dca_first_alternating",
@@ -16,7 +16,7 @@
     "dev": {"T1": 100, "T2": 100, "T3": 100, "T4": 100},
     "xplay": {"T1": 200, "T2": 200, "T3": 200, "T4": 200}
   },
-  "candidate_normalization_version": 2,
+  "candidate_normalization_version": 3,
   "curriculum_filter": "failure-conditioned DCA plus security-CFC hard-but-solvable filtering",
   "direct_current_vda_multirollout_filter": false,
   "vda_max_update_steps": 75,

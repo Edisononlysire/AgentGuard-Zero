@@ -18,7 +18,12 @@ for import_root in (ROOT, ROOT / "third_party" / "verl"):
         sys.path.insert(0, str(import_root))
 
 from agentguard_zero.env.checker import full_check, parse_scenario_json
-from agentguard_zero.protocol import TMCD_RELEASE_REVISION
+from agentguard_zero.protocol import (
+    PRIVILEGED_METADATA_FIELDS,
+    TASK_FAMILY_MAP,
+    TMCD_RELEASE_REVISION,
+    task_id_from_focus,
+)
 from agentguard_zero.training.coevolution import (
     atomic_write_json,
     load_checkpoint_manifest,
@@ -35,7 +40,7 @@ from agentguard_zero.schemas.scenario_schema_v2 import public_prefix_hash
 from agentguard_zero.variants import TRAINING_VARIANTS, experiment_variant
 
 
-DCA_CANDIDATE_NORMALIZATION_VERSION = 2
+DCA_CANDIDATE_NORMALIZATION_VERSION = 3
 
 
 def _canonicalize_candidate_identity(
@@ -114,6 +119,17 @@ def _safe_full_check(scenario: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _task_family_mismatch_checks(task_id: str, actual_family: str) -> dict[str, Any]:
+    reason = f"task_family_mismatch:{task_id}:{actual_family or 'missing'}"
+    return {
+        "all_ok": False,
+        "format": {"ok": True, "message": "ok"},
+        "valid": {"ok": False, "message": reason},
+        "solvable": {"ok": False, "message": reason},
+        "safe": {"ok": True, "message": "ok"},
+    }
+
+
 def _failure_reason(checks: dict[str, Any]) -> str:
     for name in ("format", "valid", "solvable", "safe"):
         result = checks.get(name, {})
@@ -136,7 +152,12 @@ def _candidate_record(
 ) -> dict[str, Any]:
     scenario, parse_ok, parse_message = _extract_json_object(raw_output)
     if scenario:
+        task_id = task_id_from_focus(focus)
+        expected_family = TASK_FAMILY_MAP.get(task_id, "")
+        actual_family = str(scenario.get("scenario_family", "")).strip()
         metadata = dict(scenario.get("metadata", {}) or {})
+        for field in PRIVILEGED_METADATA_FIELDS:
+            metadata.pop(field, None)
         metadata.update(
             {
                 "generator": (
@@ -144,8 +165,9 @@ def _candidate_record(
                     if manifest.get("adapter_path")
                     else "frozen_base_dca"
                 ),
-                "task_id": focus.split()[0],
+                "task_id": task_id,
                 "task_focus": focus,
+                "manipulation_family": expected_family,
                 "candidate_index": index,
                 "generation_seed": args.seed,
                 "generation_nonce": nonce,
@@ -172,7 +194,10 @@ def _candidate_record(
         scenario["scenario_id"] = (
             f"DCA-{manifest['backbone']}-R{manifest['round']}-{index:06d}-{fingerprint[:8]}"
         )
-        checks = _safe_full_check(scenario) if parse_ok else {}
+        if parse_ok and actual_family != expected_family:
+            checks = _task_family_mismatch_checks(task_id, actual_family)
+        else:
+            checks = _safe_full_check(scenario) if parse_ok else {}
     else:
         fingerprint = scenario_fingerprint({"raw": raw_output})
         checks = {}

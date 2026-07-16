@@ -3,8 +3,107 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from agentguard_zero.defender_state.evidence_signals import evidence_is_positive
 from agentguard_zero.runtime_policy import HIGH_IMPACT_ACTIONS, TARGETED_RESPONSE_ACTIONS
 from agentguard_zero.tools.business_impact import estimate_business_impact
+
+
+CONTAINMENT_ACTIONS = frozenset({"Isolate", "Remove"})
+CONTAINMENT_PREDICATES = frozenset(
+    {
+        "activity_type",
+        "anomaly_flag",
+        "asset_risk_level",
+        "attack_objective",
+        "attack_phase",
+        "attack_stage",
+        "attack_status",
+        "auth_status",
+        "authentication_failure",
+        "compromise_state",
+        "credential_state",
+        "exfiltration_state",
+        "integrity_status",
+        "intrusion_state",
+        "lateral_movement",
+        "malicious_activity",
+        "objective",
+        "persistence_state",
+        "risk",
+        "risk_level",
+        "threat_level",
+        "threat_state",
+    }
+)
+THREAT_POSITIVE_OBJECTS = frozenset(
+    {
+        "active",
+        "anomalous",
+        "anomaly",
+        "breach",
+        "breached",
+        "collection",
+        "compromised",
+        "confirmed",
+        "credential_theft",
+        "critical",
+        "detected",
+        "discovery",
+        "elevated",
+        "exfiltration",
+        "extraction",
+        "failed",
+        "failure",
+        "high",
+        "impact",
+        "initial_access",
+        "lateral_movement",
+        "malicious",
+        "persistence",
+        "sabotage",
+        "suspicious",
+        "unauthorized",
+    }
+)
+BENIGN_OR_LOW_RISK_OBJECTS = frozenset(
+    {
+        "benign",
+        "clean",
+        "healthy",
+        "inactive",
+        "legitimate_change",
+        "low",
+        "maintenance",
+        "no_attack",
+        "normal",
+        "recovered",
+        "safe",
+    }
+)
+RECOVERY_PREDICATES = frozenset(
+    {
+        "asset_state",
+        "compromise_state",
+        "integrity_status",
+        "recovery_state",
+        "service_state",
+        "system_status",
+    }
+)
+RECOVERY_POSITIVE_OBJECTS = frozenset(
+    {
+        "available",
+        "benign",
+        "clean",
+        "healthy",
+        "normal",
+        "recovered",
+        "remediated",
+        "restored",
+        "safe",
+        "stable",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -59,16 +158,20 @@ def _claim_semantics(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
 def _action_compatible(action: str, semantics: dict[str, Any]) -> bool:
     predicate = str(semantics.get("predicate", "")).strip().lower()
     object_value = str(semantics.get("object", "")).strip().lower()
-    if not predicate:
+    if not predicate or not object_value:
         return False
-    benign_markers = {
-        "benign",
-        "healthy",
-        "maintenance",
-        "normal",
-        "legitimate_change",
-    }
-    return not any(marker in {predicate, object_value} for marker in benign_markers)
+    if action in CONTAINMENT_ACTIONS:
+        return (
+            predicate in CONTAINMENT_PREDICATES
+            and object_value in THREAT_POSITIVE_OBJECTS
+            and object_value not in BENIGN_OR_LOW_RISK_OBJECTS
+        )
+    if action == "Restore":
+        return (
+            predicate in RECOVERY_PREDICATES
+            and object_value in RECOVERY_POSITIVE_OBJECTS
+        )
+    return False
 
 
 def _graph_link_evidence(
@@ -161,13 +264,13 @@ def authorize_public_response(
             continue
         entity_id = str(semantics.get("entity_id", "")).strip()
         supporting_ids = {
-            str(record.get("evidence_id", ""))
-            for record in records
-            if str(record.get("evidence_id", ""))
+            str(item)
+            for item in claim.get("support_evidence_refs", []) or []
+            if str(item) in evidence_by_id
+            and evidence_is_positive(evidence_by_id[str(item)])
         }
-        supporting_ids.update(
-            str(item) for item in claim.get("evidence_refs", []) or [] if str(item)
-        )
+        if not supporting_ids:
+            continue
         if entity_id == target:
             return ResponseAuthorization(
                 True,

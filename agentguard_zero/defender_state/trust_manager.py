@@ -5,6 +5,7 @@ import math
 from typing import Any, Iterable
 
 from agentguard_zero.defender_state.evidence_store import EvidenceStore
+from agentguard_zero.defender_state.evidence_signals import evidence_signal
 
 
 SOURCE_STATUSES = {"stable", "uncertain", "degraded", "recovering"}
@@ -13,23 +14,6 @@ CLAIM_STATUSES = {"unassessed", "challenged", "supported", "contradicted"}
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, float(value)))
-
-
-def _evidence_signal(record: dict[str, Any]) -> tuple[float, float]:
-    payload = record.get("public_payload", {}) or {}
-    verdict = str(payload.get("verdict", "")).lower()
-    positive = 0.0
-    negative = 0.0
-    if verdict in {"supported", "strongly_supported", "plausible", "challenge_passed", "consistent"}:
-        positive += 1.0
-    if verdict in {"suspicious", "challenge_failed", "contradicted", "inconsistent"}:
-        negative += 1.0
-    positive += _clamp(payload.get("consistency", 0.0))
-    positive += _clamp(payload.get("challenge_consistency", 0.0))
-    positive += _clamp(payload.get("source_reliability", 0.0))
-    negative += _clamp(payload.get("contradiction_risk", 0.0))
-    negative += _clamp(payload.get("leakage_risk", 0.0)) if payload.get("canary_triggered") else 0.0
-    return min(2.0, positive), min(2.0, negative)
 
 
 class ContextualTrustManager:
@@ -91,6 +75,8 @@ class ContextualTrustManager:
             "graph_support": 0.0,
             "contradiction_score": 0.0,
             "evidence_refs": [],
+            "support_evidence_refs": [],
+            "contradiction_evidence_refs": [],
             "claim_semantics": copy.deepcopy(public_event.get("claim_semantics", {})),
             "updated_at": int(time),
         }
@@ -161,7 +147,7 @@ class ContextualTrustManager:
         negative = 0.0
         tool_types: set[str] = set()
         for record in records:
-            pos, neg = _evidence_signal(record)
+            pos, neg = evidence_signal(record)
             positive += pos
             negative += neg
             tool_types.add(str(record.get("evidence_type", "")))
@@ -277,10 +263,17 @@ class ContextualTrustManager:
                 if (record := evidence_store.get(ref, time=time)) is not None
             ]
             positive, negative = 0.0, 0.0
+            positive_refs: list[str] = []
+            contradiction_refs: list[str] = []
             for record in records:
-                pos, neg = _evidence_signal(record)
+                pos, neg = evidence_signal(record)
                 positive += pos
                 negative += neg
+                evidence_id = str(record.get("evidence_id", ""))
+                if evidence_id and pos > neg:
+                    positive_refs.append(evidence_id)
+                if evidence_id and neg > pos:
+                    contradiction_refs.append(evidence_id)
 
             independent_roots = set(
                 evidence_store.root_sources(fresh_refs, time=time)
@@ -350,6 +343,12 @@ class ContextualTrustManager:
                 if event_id and event_id in self.claim_trust:
                     claim = self.claim_trust[event_id]
                     claim["evidence_refs"] = sorted(set(claim.get("evidence_refs", [])) | set(refs))
+                    if op in {"support", "recover"}:
+                        claim["support_evidence_refs"] = sorted(set(positive_refs))
+                    elif op == "contradict":
+                        claim["contradiction_evidence_refs"] = sorted(
+                            set(contradiction_refs)
+                        )
                     cumulative_records = [
                         record
                         for ref in claim["evidence_refs"]
@@ -408,6 +407,14 @@ class ContextualTrustManager:
                     row[key] = float(claim[key])
             if claim.get("evidence_refs"):
                 row["evidence_refs"] = copy.deepcopy(claim["evidence_refs"])
+            if claim.get("support_evidence_refs"):
+                row["support_evidence_refs"] = copy.deepcopy(
+                    claim["support_evidence_refs"]
+                )
+            if claim.get("contradiction_evidence_refs"):
+                row["contradiction_evidence_refs"] = copy.deepcopy(
+                    claim["contradiction_evidence_refs"]
+                )
             return row
 
         return {

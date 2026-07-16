@@ -39,6 +39,7 @@ from agentguard_zero.governance.v5c import score_v5c_candidate, select_v5c_json
 from agentguard_zero.schemas.action_schema_v4 import DEFAULT_ACTION_PACKET_V4, parse_action_json_v4
 from agentguard_zero.tools.business_impact import estimate_business_impact
 from agentguard_zero.training.vda_dataset import scenario_horizon, scenario_to_training_row
+from agentguard_zero.protocol import PRIVILEGED_METADATA_FIELDS
 from level1_rollout_server import Level1RolloutStore
 from vda_feedback_server import _generation_messages, _history_summary
 
@@ -808,14 +809,14 @@ def row_context(row: dict[str, Any], row_index: int, args: argparse.Namespace) -
     if scenario.get("protocol_version") == "tmcd-v2":
         scenario = copy.deepcopy(scenario)
         metadata = dict(scenario.get("metadata", {}) or {})
+        for field in PRIVILEGED_METADATA_FIELDS:
+            metadata.pop(field, None)
         if args.system == "react_base_tools":
             metadata["experiment_variant"] = "no_state_layer"
         elif args.system == "memory_agent":
             metadata["experiment_variant"] = "append_only_memory"
         else:
             metadata["experiment_variant"] = "full"
-        if args.system == "oracle_defender":
-            metadata["oracle_defender"] = True
         scenario["metadata"] = metadata
         rebuilt = scenario_to_training_row(scenario, split=str(row.get("split", "eval")))
         row = {**row, **rebuilt}
@@ -832,7 +833,10 @@ def run_static_one(row: dict[str, Any], row_index: int, args: argparse.Namespace
     messages, public_context, extra, scenario, scenario_id, max_env_steps, budget = row_context(row, row_index, args)
     max_turns = min(args.max_turns, max_env_steps)
     trajectory_id = f"{args.run_name}-{args.system}-{row_index}-{scenario_id}"
-    store = Level1RolloutStore(invalid_penalty=args.invalid_penalty)
+    store = Level1RolloutStore(
+        invalid_penalty=args.invalid_penalty,
+        oracle_mode=args.system == "oracle_defender",
+    )
     action_fn = STATIC_POLICIES[args.system]
     selected_actions: list[dict[str, Any]] = []
     final_observation: dict[str, Any] | None = None
@@ -887,7 +891,10 @@ def run_model_one(row: dict[str, Any], row_index: int, backend: Any, args: argpa
     messages, public_context, extra, scenario, scenario_id, max_env_steps, budget = row_context(row, row_index, args)
     max_turns = min(args.max_turns, max_env_steps)
     trajectory_id = f"{args.run_name}-{args.system}-{row_index}-{scenario_id}"
-    store = Level1RolloutStore(invalid_penalty=args.invalid_penalty)
+    store = Level1RolloutStore(
+        invalid_penalty=args.invalid_penalty,
+        oracle_mode=args.system == "oracle_defender",
+    )
     selected_actions: list[dict[str, Any]] = []
     final_observation: dict[str, Any] | None = None
     done = False
@@ -948,7 +955,10 @@ def run_model_many(
 ) -> list[dict[str, Any]]:
     policy = model_policy(args.system)
     candidate_count = default_candidate_count(args.system, args.candidate_count)
-    store = Level1RolloutStore(invalid_penalty=args.invalid_penalty)
+    store = Level1RolloutStore(
+        invalid_penalty=args.invalid_penalty,
+        oracle_mode=args.system == "oracle_defender",
+    )
     states: list[dict[str, Any]] = []
     for row_index, row in indexed_rows:
         messages, public_context, extra, scenario, scenario_id, max_env_steps, budget = row_context(

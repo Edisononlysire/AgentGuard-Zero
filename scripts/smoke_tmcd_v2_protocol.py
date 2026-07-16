@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 from agentguard_zero.env.checker import full_check
 from agentguard_zero.env.cyber_env_v2 import CyberDefenseEnvV2
 from agentguard_zero.env.oracle_v2 import score_trajectory_v2
+from agentguard_zero.protocol import TASK_FAMILY_MAP
 from agentguard_zero.schemas.action_schema_v4 import DEFAULT_ACTION_PACKET_V4, validate_action_packet_v4
 from agentguard_zero.schemas.scenario_schema_v2 import (
     paired_counterpart_v2,
@@ -33,12 +34,7 @@ from agentguard_zero.training.coevolution import atomic_write_json, scenario_fin
 from agentguard_zero.world.public_projector import assert_public
 
 
-TASK_FAMILIES = {
-    "T1": "active_probe_ambiguity",
-    "T2": "trust_betrayal",
-    "T3": "profile_poisoning",
-    "T4": "business_overresponse",
-}
+TASK_FAMILIES = TASK_FAMILY_MAP
 
 
 def _rename_sources(scenario: dict[str, Any], suffix: str) -> None:

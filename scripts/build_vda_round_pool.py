@@ -19,7 +19,12 @@ for path in (ROOT, ROOT / "scripts"):
         sys.path.insert(0, str(path))
 
 from agentguard_zero.env.checker import full_check
-from agentguard_zero.protocol import TMCD_RELEASE_REVISION
+from agentguard_zero.protocol import (
+    FAMILY_TASK_MAP,
+    TASK_FAMILY_MAP,
+    TMCD_RELEASE_REVISION,
+    task_id_from_focus,
+)
 from agentguard_zero.training.coevolution import (
     LineageError,
     atomic_write_json,
@@ -49,11 +54,20 @@ def _safe_cfc_metrics(scenario: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _task_id(record: dict[str, Any], scenario: dict[str, Any]) -> str:
-    value = str(record.get("task_focus") or scenario.get("metadata", {}).get("task_id", ""))
-    for task_id in TASK_IDS:
-        if value.upper().startswith(task_id):
-            return task_id
-    return "unknown"
+    metadata = scenario.get("metadata", {}) or {}
+    family = str(scenario.get("scenario_family", "")).strip()
+    family_task_id = FAMILY_TASK_MAP.get(family, "unknown")
+    focus_task_id = task_id_from_focus(str(record.get("task_focus", "")))
+    metadata_task_id = str(metadata.get("task_id", "")).strip().upper()
+    manipulation_family = str(metadata.get("manipulation_family", "")).strip()
+    if (
+        family_task_id == "unknown"
+        or focus_task_id != family_task_id
+        or metadata_task_id != family_task_id
+        or manipulation_family != TASK_FAMILY_MAP[family_task_id]
+    ):
+        return "unknown"
+    return family_task_id
 
 
 def _write_parquet(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -399,6 +413,10 @@ def main() -> None:
         if not checks.get("all_ok", False):
             excluded["hard_check"] += 1
             continue
+        task_id = _task_id(record, scenario)
+        if task_id == "unknown":
+            excluded["task_family_mismatch"] += 1
+            continue
         cfc = _safe_cfc_metrics(scenario)
         if cfc is None:
             excluded["cfc_exception"] += 1
@@ -413,7 +431,7 @@ def main() -> None:
         base_item = {
             **record,
             "scenario_fingerprint": fingerprint,
-            "task_id": _task_id(record, scenario),
+            "task_id": task_id,
             "cfc": cfc,
         }
         if base_item["task_id"] == "T2" and scenario.get("protocol_version") == "tmcd-v2":

@@ -44,11 +44,18 @@ class CyberDefenseEnvV2:
 
     protocol_version = "tmcd-v2"
 
-    def __init__(self, scenario: dict[str, Any], max_steps: int | None = None) -> None:
+    def __init__(
+        self,
+        scenario: dict[str, Any],
+        max_steps: int | None = None,
+        *,
+        oracle_mode: bool = False,
+    ) -> None:
         valid, reason = validate_scenario_v2(scenario)
         if not valid:
             raise ValueError(f"invalid TMCD-v2 scenario: {reason}")
         self.scenario = copy.deepcopy(scenario)
+        self.oracle_mode = bool(oracle_mode)
         latest_event_time = max(
             (int(event.get("time", -1)) for event in scenario.get("event_schedule", [])),
             default=-1,
@@ -476,9 +483,7 @@ class CyberDefenseEnvV2:
                     - self.high_impact_count
                 ),
             },
-            oracle_override=bool(
-                self.scenario.get("metadata", {}).get("oracle_defender", False)
-            ),
+            oracle_override=self.oracle_mode,
         )
 
     def step(self, action_packet: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], bool]:

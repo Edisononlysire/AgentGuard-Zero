@@ -23,7 +23,7 @@ from agentguard_zero.evaluation.rq3_memory import (
     memory_lifecycle_metrics,
 )
 from agentguard_zero.governance.v5c import score_v5c_candidate, select_v5c
-from agentguard_zero.protocol import TMCD_RELEASE_REVISION
+from agentguard_zero.protocol import TASK_FAMILY_MAP, TMCD_RELEASE_REVISION
 from agentguard_zero.schemas.action_schema_v4 import DEFAULT_ACTION_PACKET_V4, parse_action_json_v4
 from agentguard_zero.schemas.scenario_schema_v2 import (
     OOD_FAMILIES,
@@ -61,7 +61,7 @@ from agentguard_zero.variants import (
     experiment_variant,
 )
 from agentguard_zero.world.public_projector import assert_public, forbidden_public_paths, project_public
-from scripts.build_vda_round_pool import _split_stratified, _split_task_quotas
+from scripts.build_vda_round_pool import _split_stratified, _split_task_quotas, _task_id
 from scripts.build_vda_partial_gate_dataset import collect_balanced_records
 from scripts.eval_tmcd_systems import (
     SYSTEMS,
@@ -74,6 +74,7 @@ from scripts.eval_tmcd_systems import (
 from scripts.level1_rollout_server import Level1RolloutStore
 from scripts.generate_dca_scenarios import (
     DCA_CANDIDATE_NORMALIZATION_VERSION,
+    _candidate_record,
     _canonicalize_candidate_identity,
 )
 from scripts.merge_dca_candidate_shards import merge_candidate_shards
@@ -890,7 +891,7 @@ class TMCDV2DatasetTests(unittest.TestCase):
         self.assertEqual(first["prefix_hash"], public_prefix_hash(first))
         self.assertEqual(
             DCA_CANDIDATE_NORMALIZATION_VERSION,
-            2,
+            3,
         )
 
     def test_candidate_merge_preserves_generation_lineage(self) -> None:
@@ -1195,6 +1196,218 @@ class TMCDV2ReleaseTests(unittest.TestCase):
 
 
 class TMCDV2TeacherReviewTests(unittest.TestCase):
+    @staticmethod
+    def _add_positive_support_evidence(
+        env: CyberDefenseEnvV2,
+        event: dict,
+    ) -> str:
+        return env.evidence_store.add_tool_result(
+            {
+                "tool": "CrossCheck",
+                "event_id": event["event_id"],
+                "verdict": "supported",
+                "consistency": 1.0,
+                "claim_semantics": copy.deepcopy(event["claim_semantics"]),
+                "root_source_ids": ["independent-verifier"],
+            },
+            time=-1,
+            parent_evidence_ids=[event["evidence_id"]],
+        )
+
+    @staticmethod
+    def _authorize_with_semantics(
+        semantics: dict,
+        *,
+        oracle_mode: bool = False,
+    ) -> tuple[CyberDefenseEnvV2, dict]:
+        scenario = minimal_example_v2()
+        scenario["event_schedule"][0]["claim_semantics"] = copy.deepcopy(semantics)
+        scenario["event_schedule"][0]["entity_id"] = semantics["entity_id"]
+        env = CyberDefenseEnvV2(scenario, oracle_mode=oracle_mode)
+        observation = env.observe()
+        event = observation["observed_events"][0]
+        support_evidence = TMCDV2TeacherReviewTests._add_positive_support_evidence(
+            env, event
+        )
+        claim = env.trust_manager.claim_trust[event["event_id"]]
+        claim["status"] = "supported"
+        claim["score"] = 0.90
+        claim["support_evidence_refs"] = [support_evidence]
+        env.step(
+            _action(
+                evidence_assessment=[
+                    {"event_id": event["event_id"], "status": "supported"}
+                ],
+                response={"tier": "L3", "action": "Isolate", "target": "database"},
+            )
+        )
+        return env, env.history[-1]["response_result"]
+
+    def test_supported_low_risk_claim_cannot_authorize_isolate(self) -> None:
+        _env, result = self._authorize_with_semantics(
+            {
+                "entity_id": "database",
+                "predicate": "asset_risk_level",
+                "object": "low",
+                "scope": "cyber_defense",
+            }
+        )
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["executed_action"], "Observe")
+
+    def test_supported_high_risk_claim_can_authorize_isolate(self) -> None:
+        _env, result = self._authorize_with_semantics(
+            {
+                "entity_id": "database",
+                "predicate": "asset_risk_level",
+                "object": "critical",
+                "scope": "cyber_defense",
+            }
+        )
+        self.assertFalse(result["blocked"])
+        self.assertEqual(result["executed_action"], "Isolate")
+
+    def test_scenario_metadata_cannot_enable_oracle_override(self) -> None:
+        scenario = minimal_example_v2()
+        scenario.setdefault("metadata", {})["oracle_defender"] = True
+        valid, reason = validate_scenario_v2(scenario)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "privileged_metadata_forbidden:oracle_defender")
+        with self.assertRaisesRegex(ValueError, "privileged_metadata_forbidden"):
+            CyberDefenseEnvV2(scenario)
+
+    def test_oracle_override_requires_explicit_runtime_flag(self) -> None:
+        response = {"tier": "L3", "action": "Isolate", "target": "database"}
+        normal = CyberDefenseEnvV2(minimal_example_v2())
+        normal.observe()
+        normal.step(_action(response=response))
+        self.assertTrue(normal.history[-1]["response_result"]["blocked"])
+
+        oracle = CyberDefenseEnvV2(minimal_example_v2(), oracle_mode=True)
+        oracle.observe()
+        oracle.step(_action(response=response))
+        self.assertFalse(oracle.history[-1]["response_result"]["blocked"])
+
+    def test_generated_candidate_strips_privileged_metadata(self) -> None:
+        scenario = task_example_v2(TASK_FOCI[0])
+        scenario.setdefault("metadata", {}).update(
+            {"oracle_defender": True, "oracle_mode": True, "privileged": True}
+        )
+        record = _candidate_record(
+            raw_output=json.dumps(scenario),
+            index=0,
+            focus=TASK_FOCI[0],
+            nonce=7,
+            attempt=1,
+            args=SimpleNamespace(
+                seed=7,
+                shard_index=0,
+                num_shards=1,
+                experiment_variant="full",
+            ),
+            manifest={"adapter_path": None, "round": 1, "backbone": "qwen3.5-4b"},
+            manifest_path=Path("manifest.json"),
+            manifest_sha="a" * 64,
+        )
+        self.assertTrue(record["checks"]["all_ok"])
+        metadata = record["scenario"]["metadata"]
+        self.assertFalse(
+            {"oracle_defender", "oracle_mode", "privileged"} & set(metadata)
+        )
+
+    def test_task_focus_family_mismatch_is_rejected(self) -> None:
+        scenario = task_example_v2(TASK_FOCI[2])
+        record = _candidate_record(
+            raw_output=json.dumps(scenario),
+            index=0,
+            focus=TASK_FOCI[0],
+            nonce=7,
+            attempt=1,
+            args=SimpleNamespace(
+                seed=7,
+                shard_index=0,
+                num_shards=1,
+                experiment_variant="full",
+            ),
+            manifest={"adapter_path": None, "round": 1, "backbone": "qwen3.5-4b"},
+            manifest_path=Path("manifest.json"),
+            manifest_sha="a" * 64,
+        )
+        self.assertFalse(record["checks"]["all_ok"])
+        self.assertIn(
+            "task_family_mismatch:T1:profile_poisoning",
+            record["checks"]["valid"]["message"],
+        )
+
+    def test_task_focus_family_mapping_is_exact(self) -> None:
+        for focus in TASK_FOCI:
+            scenario = task_example_v2(focus)
+            record = {"task_focus": focus}
+            self.assertEqual(_task_id(record, scenario), focus.split()[0])
+            self.assertEqual(
+                scenario["scenario_family"], TASK_FAMILY_MAP[focus.split()[0]]
+            )
+        mismatch = task_example_v2(TASK_FOCI[2])
+        self.assertEqual(_task_id({"task_focus": TASK_FOCI[0]}, mismatch), "unknown")
+
+    def test_only_positive_support_refs_enter_authorization_evidence(self) -> None:
+        env = CyberDefenseEnvV2(minimal_example_v2())
+        observation = env.observe()
+        event = observation["observed_events"][0]
+        parent = event["evidence_id"]
+        positive = env.evidence_store.add_tool_result(
+            {
+                "tool": "CrossCheck",
+                "event_id": event["event_id"],
+                "verdict": "supported",
+                "consistency": 1.0,
+                "claim_semantics": copy.deepcopy(event["claim_semantics"]),
+                "root_source_ids": ["sensor-B"],
+            },
+            time=-1,
+            parent_evidence_ids=[parent],
+        )
+        negative_probe = env.evidence_store.add_tool_result(
+            {
+                "tool": "SourceChallenge",
+                "event_id": event["event_id"],
+                "probe_id": "probe-negative",
+                "verdict": "challenge_failed",
+                "contradiction_risk": 0.2,
+                "claim_semantics": copy.deepcopy(event["claim_semantics"]),
+                "root_source_ids": ["sensor-B"],
+            },
+            time=-1,
+            parent_evidence_ids=[parent],
+        )
+        committed = env.trust_manager.apply(
+            [
+                {
+                    "op": "support",
+                    "source_id": event["source_id"],
+                    "event_id": event["event_id"],
+                    "evidence_refs": [positive, negative_probe],
+                }
+            ],
+            evidence_store=env.evidence_store,
+            time=0,
+        )[0]
+        self.assertTrue(committed["committed"])
+        claim = env.trust_manager.claim_for(event["event_id"])
+        self.assertEqual(claim["support_evidence_refs"], [positive])
+        self.assertNotIn(negative_probe, claim["support_evidence_refs"])
+        env.step(
+            _action(
+                evidence_assessment=[
+                    {"event_id": event["event_id"], "status": "supported"}
+                ],
+                response={"tier": "L3", "action": "Isolate", "target": "database"},
+            )
+        )
+        refs = env.history[-1]["response_result"]["authorization_evidence_ids"]
+        self.assertIn(positive, refs)
+        self.assertNotIn(negative_probe, refs)
+
     def test_multi_event_same_time_oracle_ledger_records_every_event(self) -> None:
         scenario = minimal_example_v2()
         second = copy.deepcopy(scenario["event_schedule"][-1])
@@ -1459,9 +1672,14 @@ class TMCDV2TeacherReviewTests(unittest.TestCase):
     def test_supported_high_impact_action_can_execute(self) -> None:
         env = CyberDefenseEnvV2(minimal_example_v2())
         observation = env.observe()
-        event_id = observation["observed_events"][0]["event_id"]
+        event = observation["observed_events"][0]
+        event_id = event["event_id"]
+        support_evidence = self._add_positive_support_evidence(env, event)
         env.trust_manager.claim_trust[event_id]["status"] = "supported"
         env.trust_manager.claim_trust[event_id]["score"] = 0.90
+        env.trust_manager.claim_trust[event_id]["support_evidence_refs"] = [
+            support_evidence
+        ]
         env.step(
             _action(
                 evidence_assessment=[{"event_id": event_id, "status": "supported"}],
