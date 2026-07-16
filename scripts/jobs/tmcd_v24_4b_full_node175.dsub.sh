@@ -1,31 +1,31 @@
 #!/bin/bash
-#DSUB -n AGZV24_4B_FULL
+#DSUB -n AGZV242_4B_FULL
 #DSUB -N 1
 #DSUB -A root.project.P24Z28400N0259_tmp2
 #DSUB -R "cpu=64;gpu=4;mem=230000"
 #DSUB -pn cyclone001-agent-175
-#DSUB -oo /home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero/logs/tmcd_v24/%J.out
-#DSUB -eo /home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero/logs/tmcd_v24/%J.err
+#DSUB -oo /home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero/logs/tmcd_v242/%J.out
+#DSUB -eo /home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero/logs/tmcd_v242/%J.err
 
 set -euo pipefail
 
 ROOT=/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero
 EXPECTED_NODE=cyclone001-agent-175
-DATA_ROOT=${ROOT}/data/tmcd_v24/qwen3.5-4b
-CHECKPOINT_ROOT=${ROOT}/checkpoints/tmcd_v24/qwen3.5-4b
+DATA_ROOT=${ROOT}/data/tmcd_v242/qwen3.5-4b
+CHECKPOINT_ROOT=${ROOT}/checkpoints/tmcd_v242/qwen3.5-4b
 if [[ "$(hostname)" != "${EXPECTED_NODE}" ]]; then
   echo "Refusing to run outside ${EXPECTED_NODE}: $(hostname)" >&2
   exit 72
 fi
 if [[ -e "${DATA_ROOT}" || -e "${CHECKPOINT_ROOT}" ]]; then
   if [[ "${AGZ_FORMAL_RESUME:-0}" != "1" ]]; then
-    echo "Refusing to overwrite formal TMCD v2.4 outputs: ${DATA_ROOT} ${CHECKPOINT_ROOT}" >&2
+    echo "Refusing to overwrite formal TMCD v2.4.2 outputs: ${DATA_ROOT} ${CHECKPOINT_ROOT}" >&2
     exit 73
   fi
-  echo "Explicitly resuming preserved TMCD v2.4 outputs: ${DATA_ROOT} ${CHECKPOINT_ROOT}"
+  echo "Explicitly resuming preserved TMCD v2.4.2 outputs: ${DATA_ROOT} ${CHECKPOINT_ROOT}"
 fi
 
-mkdir -p "${ROOT}/logs/tmcd_v24" "${ROOT}/outputs/tmcd_v24/preflight"
+mkdir -p "${ROOT}/logs/tmcd_v242" "${ROOT}/outputs/tmcd_v242/preflight"
 export AGZ_ROOT=${ROOT}
 source "${ROOT}/scripts/qwen35_env.sh"
 source "${ROOT}/scripts/env.sh"
@@ -85,13 +85,13 @@ python -s "${ROOT}/scripts/preflight_tmcd_v2_job.py" \
   --model-path "${AGZ_QWEN35_4B_PATH}" \
   --variant full \
   --expected-node agent-175 \
-  --output "${ROOT}/outputs/tmcd_v24/preflight/node175_4b_full.json"
+  --output "${ROOT}/outputs/tmcd_v242/preflight/node175_4b_full.json"
 
 python -s "${ROOT}/scripts/run_three_rounds.py" \
   --root "${ROOT}" \
   --backbone qwen3.5-4b \
   --experiment-variant full \
-  --artifact-scope tmcd_v24 \
+  --artifact-scope tmcd_v242 \
   --model-path "${AGZ_QWEN35_4B_PATH}" \
   --allocated-gpus "${CUDA_VISIBLE_DEVICES}" \
   --seed 20260709 \
@@ -109,4 +109,4 @@ python -s "${ROOT}/scripts/run_three_rounds.py" \
   --vda-max-turns 16 \
   --candidate-batch-size 72
 
-touch "${ROOT}/outputs/tmcd_v24/node175_4b_full.SUCCEEDED"
+touch "${ROOT}/outputs/tmcd_v242/node175_4b_full.SUCCEEDED"
