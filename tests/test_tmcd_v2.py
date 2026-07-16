@@ -1160,7 +1160,7 @@ class TMCDV2ReleaseTests(unittest.TestCase):
         self.assertIn("source tree hash mismatch", preflight_source)
         self.assertIn('f"{report_path.stem}.protocol_smoke.json"', preflight_source)
 
-    def test_v24_formal_jobs_are_node_pinned_and_refuse_overwrite(self) -> None:
+    def test_v242_formal_jobs_are_node_pinned_and_refuse_overwrite(self) -> None:
         root = Path(__file__).resolve().parents[1]
         expected = {
             "tmcd_v24_4b_full_node175.dsub.sh": ("cyclone001-agent-175", "full"),
@@ -1173,9 +1173,9 @@ class TMCDV2ReleaseTests(unittest.TestCase):
         for name, (node, variant) in expected.items():
             source = (root / "scripts" / "jobs" / name).read_text(encoding="utf-8")
             self.assertIn(f"#DSUB -pn {node}", source)
-            self.assertIn('artifact-scope tmcd_v24', source)
+            self.assertIn('--artifact-scope tmcd_v242', source)
             self.assertIn(f"--experiment-variant {variant}", source)
-            self.assertIn("Refusing to overwrite formal TMCD v2.4 outputs", source)
+            self.assertIn("Refusing to overwrite formal TMCD v2.4.2 outputs", source)
             self.assertIn('AGZ_FORMAL_RESUME:-0', source)
             self.assertIn("--dca-feedback-candidates 4000", source)
             self.assertIn("--vda-candidates 10000", source)
