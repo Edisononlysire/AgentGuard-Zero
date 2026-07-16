@@ -1184,6 +1184,8 @@ class TMCDV2ReleaseTests(unittest.TestCase):
             self.assertIn("--vda-xplay-size 800", source)
             self.assertIn("AGZ_REQUIRE_TRAJECTORY_REWARD=1", source)
             self.assertNotIn("select_only", source)
+            if name == "tmcd_v24_9b_full_node217.dsub.sh":
+                self.assertIn("AGZ_VDA_GENERATION_BATCH_SIZE=32", source)
 
     def test_round_runner_invalidates_downstream_pool_and_can_stop_before_vda(self) -> None:
         root = Path(__file__).resolve().parents[1]
