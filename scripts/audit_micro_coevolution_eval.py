@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed pre/post gate for the isolated 1k->500 co-evolution pilot."""
+"""Fail-closed pre/post gate for an isolated co-evolution scale pilot."""
 
 from __future__ import annotations
 
@@ -92,6 +92,8 @@ def main() -> int:
     parser.add_argument("--vda-manifest", type=Path, required=True)
     parser.add_argument("--round", type=int, required=True)
     parser.add_argument("--expected-scenarios", type=int, default=200)
+    parser.add_argument("--expected-candidates", type=int, default=1000)
+    parser.add_argument("--expected-train-size", type=int, default=500)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
@@ -120,20 +122,23 @@ def main() -> int:
 
     if pool.get("selection_policy") != "pilot_balanced_50_40_10":
         failures.append("selection_policy")
-    if int(pool.get("candidate_count", -1)) != 1000:
+    if int(pool.get("candidate_count", -1)) != args.expected_candidates:
         failures.append("candidate_pool_size")
-    if int((pool.get("split_counts", {}) or {}).get("train", -1)) != 500:
+    if int((pool.get("split_counts", {}) or {}).get("train", -1)) != args.expected_train_size:
         failures.append("train_size")
-    if (pool.get("train_difficulty_counts", {}) or {}) != {
-        "easy": 250,
-        "frontier": 200,
-        "hard_reachable": 50,
-    }:
+    if args.expected_train_size % 10:
+        raise ValueError("expected train size must be divisible by 10")
+    expected_difficulty_counts = {
+        "easy": args.expected_train_size * 5 // 10,
+        "frontier": args.expected_train_size * 4 // 10,
+        "hard_reachable": args.expected_train_size // 10,
+    }
+    if (pool.get("train_difficulty_counts", {}) or {}) != expected_difficulty_counts:
         failures.append("train_difficulty_mix")
     if int(vda.get("round", -1)) != args.round:
         failures.append("vda_round")
     training = vda.get("training_config", {}) or {}
-    if int(training.get("train_size", -1)) != 500:
+    if int(training.get("train_size", -1)) != args.expected_train_size:
         failures.append("vda_manifest_train_size")
     if training.get("pilot_selection_policy") != "pilot_balanced_50_40_10":
         failures.append("vda_manifest_selection_policy")
@@ -181,6 +186,9 @@ def main() -> int:
         "failures": failures,
         "thresholds": {
             "scenario_count": args.expected_scenarios,
+            "candidate_pool_size": args.expected_candidates,
+            "train_size": args.expected_train_size,
+            "train_difficulty_counts": expected_difficulty_counts,
             "candidate_count": 1,
             "post_action_validity_min": 0.98,
             "post_observe_max": 0.80,

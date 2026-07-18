@@ -1412,6 +1412,49 @@ class TMCDV2ReleaseTests(unittest.TestCase):
             str(gate_layout.checkpoint_dir("dca", 1)),
         )
 
+    def test_4k8_to_2k4_scale_job_is_isolated_and_balanced(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root
+            / "scripts/jobs/tmcd_v2_pilot_4b_4k8_2k4_node208.dsub.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("#DSUB -pn cyclone001-agent-208", source)
+        self.assertIn("SCOPE=tmcd_v2_pilot_fast_4k8_2k4", source)
+        self.assertIn("--dca-feedback-candidates 4800", source)
+        self.assertIn("--dca-batch-size 80", source)
+        self.assertIn("--dca-steps 30", source)
+        self.assertIn("--vda-candidates 4800", source)
+        self.assertIn("--vda-train-size 2400", source)
+        self.assertIn("--vda-dev-size 400", source)
+        self.assertIn("--vda-xplay-size 800", source)
+        self.assertIn("--vda-batch-size 32", source)
+        self.assertIn("--vda-steps 75", source)
+        self.assertIn("export AGZ_VDA_GENERATION_BATCH_SIZE=96", source)
+        self.assertIn("--candidate-batch-size 72", source)
+        self.assertIn("--limit 800", source)
+        self.assertIn("--expected-scenarios 800", source)
+        self.assertIn("--expected-candidates 4800", source)
+        self.assertIn("--expected-train-size 2400", source)
+
+        layout = RoundLayout(
+            root=root,
+            backbone="qwen3.5-4b",
+            source_round=0,
+            artifact_scope="tmcd_v2_pilot_fast_4k8_2k4",
+        )
+        self.assertIn("data/tmcd_v2_pilot_fast_4k8_2k4", str(layout.data_dir))
+        self.assertIn(
+            "checkpoints/tmcd_v2_pilot_fast_4k8_2k4",
+            str(layout.checkpoint_dir("vda", 1)),
+        )
+
+        audit = (root / "scripts/audit_micro_coevolution_eval.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"--expected-candidates"', audit)
+        self.assertIn('"--expected-train-size"', audit)
+        self.assertIn("args.expected_train_size * 5 // 10", audit)
+
     def test_round_runner_invalidates_downstream_pool_and_can_stop_before_vda(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "scripts" / "run_dca_first_round.py").read_text(

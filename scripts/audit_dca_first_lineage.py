@@ -207,6 +207,7 @@ def main() -> None:
             "tmcd_v2_pilot",
             "tmcd_v2_pilot_fast",
             "tmcd_v2_pilot_fast_gate",
+            "tmcd_v2_pilot_fast_4k8_2k4",
             "tmcd_v24",
             "tmcd_v242",
         ],
