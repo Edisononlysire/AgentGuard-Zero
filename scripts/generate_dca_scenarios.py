@@ -226,7 +226,15 @@ def _load_partial(path: Path, expected_config: dict[str, Any]) -> dict[int, dict
             metadata = json.loads(first)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"invalid candidate partial metadata: {path}") from exc
-        if metadata.get("kind") != "meta" or metadata.get("config") != expected_config:
+        actual_config = metadata.get("config")
+        if isinstance(actual_config, dict):
+            # Partials written before task-targeted held-out top-ups existed do
+            # not contain this optional field.  Treat absence as the old
+            # spelling of the unchanged all-task mode.
+            actual_config = dict(actual_config)
+            if "task_id" not in actual_config and expected_config.get("task_id") is None:
+                actual_config["task_id"] = None
+        if metadata.get("kind") != "meta" or actual_config != expected_config:
             raise RuntimeError(f"candidate partial config mismatch: {path}")
         for line in handle:
             try:
@@ -293,6 +301,11 @@ def parse_args() -> argparse.Namespace:
         "--experiment-variant",
         choices=TRAINING_VARIANTS,
         default="full",
+    )
+    parser.add_argument(
+        "--task-id",
+        choices=["T1", "T2", "T3", "T4"],
+        help="Generate only one task; used for quota-preserving held-out top-ups.",
     )
     return parser.parse_args()
 
@@ -391,6 +404,7 @@ def main() -> None:
         "candidate_normalization_version": DCA_CANDIDATE_NORMALIZATION_VERSION,
         "tmcd_release_revision": TMCD_RELEASE_REVISION,
         "experiment_variant": args.experiment_variant,
+        "task_id": args.task_id,
     }
     if not args.resume:
         partial_path.unlink(missing_ok=True)
@@ -412,7 +426,11 @@ def main() -> None:
             descriptors: list[tuple[int, str, int]] = []
             prompt_texts = []
             for index in retry_indices:
-                focus = TASK_FOCI[index % len(TASK_FOCI)]
+                focus = (
+                    next(value for value in TASK_FOCI if value.startswith(args.task_id))
+                    if args.task_id
+                    else TASK_FOCI[index % len(TASK_FOCI)]
+                )
                 nonce_seed = args.seed + index * 1_000_003 + attempt * 15_485_863
                 nonce = random.Random(nonce_seed).getrandbits(63)
                 descriptors.append((index, focus, nonce))
@@ -546,6 +564,7 @@ def main() -> None:
         "max_attempts": args.max_attempts,
         "generation_config": partial_config,
         "experiment_variant": args.experiment_variant,
+        "task_id": args.task_id,
         "candidates": records,
     }
     atomic_write_json(args.output, output)
