@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -62,7 +63,12 @@ from agentguard_zero.variants import (
     experiment_variant,
 )
 from agentguard_zero.world.public_projector import assert_public, forbidden_public_paths, project_public
-from scripts.build_vda_round_pool import _split_stratified, _split_task_quotas, _task_id
+from scripts.build_vda_round_pool import (
+    _pilot_mix_task_quotas,
+    _split_stratified,
+    _split_task_quotas,
+    _task_id,
+)
 from scripts.build_vda_partial_gate_dataset import collect_balanced_records
 from scripts.eval_tmcd_systems import (
     SYSTEMS,
@@ -887,6 +893,82 @@ class TMCDV2DatasetTests(unittest.TestCase):
         quotas = _split_task_quotas({"train": 2400, "dev": 400, "xplay": 800})
         for task_id in ("T1", "T2", "T3", "T4"):
             self.assertEqual(sum(split[task_id] for split in quotas.values()), 900)
+
+    def test_micro_pilot_quotas_keep_t2_even_and_exact_mix(self) -> None:
+        quotas = _split_task_quotas({"train": 500, "dev": 100, "xplay": 200})
+        self.assertEqual(sum(quotas["train"].values()), 500)
+        self.assertEqual(quotas["train"]["T2"] % 2, 0)
+        self.assertLessEqual(
+            max(quotas["train"].values()) - min(quotas["train"].values()),
+            2,
+        )
+        mix = _pilot_mix_task_quotas(quotas["train"])
+        totals = {
+            name: sum(mix[task_id][name] for task_id in mix)
+            for name in ("easy", "frontier", "hard_reachable")
+        }
+        self.assertEqual(totals, {"easy": 250, "frontier": 200, "hard_reachable": 50})
+        self.assertTrue(all(value % 2 == 0 for value in mix["T2"].values()))
+
+    def test_micro_pilot_split_is_balanced_and_preserves_pairs(self) -> None:
+        items = []
+        for task_id in ("T1", "T2", "T3", "T4"):
+            if task_id == "T2":
+                for index in range(110):
+                    for branch in ("betrayal", "legitimate_change"):
+                        items.append(
+                            {
+                                "task_id": task_id,
+                                "scenario_fingerprint": f"{task_id}-{index}-{branch}",
+                                "scenario": {
+                                    "pair_id": f"pilot-pair-{index}",
+                                    "trajectory_type": branch,
+                                },
+                                "cfc": {"frontier_score": index / 109.0},
+                            }
+                        )
+            else:
+                for index in range(220):
+                    items.append(
+                        {
+                            "task_id": task_id,
+                            "scenario_fingerprint": f"{task_id}-{index}",
+                            "scenario": {},
+                            "cfc": {"frontier_score": index / 219.0},
+                        }
+                    )
+        splits = _split_stratified(
+            items,
+            {"train": 500, "dev": 100, "xplay": 200},
+            17,
+            train_difficulty_mix=True,
+        )
+        self.assertEqual({name: len(rows) for name, rows in splits.items()}, {
+            "train": 500,
+            "dev": 100,
+            "xplay": 200,
+        })
+        train_mix = Counter(
+            row["selection_difficulty_stratum"] for row in splits["train"]
+        )
+        self.assertEqual(
+            train_mix,
+            Counter({"easy": 250, "frontier": 200, "hard_reachable": 50}),
+        )
+        pair_locations = {}
+        pair_strata = {}
+        for split, rows in splits.items():
+            for row in rows:
+                if row["task_id"] != "T2":
+                    continue
+                pair_id = row["scenario"]["pair_id"]
+                pair_locations.setdefault(pair_id, set()).add(split)
+                if split == "train":
+                    pair_strata.setdefault(pair_id, set()).add(
+                        row["selection_difficulty_stratum"]
+                    )
+        self.assertTrue(all(len(value) == 1 for value in pair_locations.values()))
+        self.assertTrue(all(len(value) == 1 for value in pair_strata.values()))
 
     def test_difficulty_stratified_split_is_exact_and_keeps_t2_pairs(self) -> None:
         items = []

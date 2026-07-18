@@ -43,6 +43,11 @@ from generate_level1_frontier import compute_cfc_metrics
 
 
 TASK_IDS = ("T1", "T2", "T3", "T4")
+PILOT_DIFFICULTY_MIX = {
+    "easy": 0.50,
+    "frontier": 0.40,
+    "hard_reachable": 0.10,
+}
 
 
 def _safe_cfc_metrics(scenario: dict[str, Any]) -> dict[str, Any] | None:
@@ -93,8 +98,109 @@ def _split_task_quotas(split_counts: dict[str, int]) -> dict[str, dict[str, int]
         for offset in range(remainder):
             quota[TASK_IDS[(remainder_offset + offset) % len(TASK_IDS)]] += 1
         remainder_offset = (remainder_offset + remainder) % len(TASK_IDS)
+        # T2 is represented by inseparable betrayal/legitimate-change pairs.
+        # Odd split sizes such as the 500-row micro pilot therefore use the
+        # closest possible task balance while keeping the T2 quota even.
+        if quota["T2"] % 2:
+            quota["T2"] -= 1
+            recipients = [task_id for task_id in TASK_IDS if task_id != "T2"]
+            recipient = min(
+                recipients,
+                key=lambda task_id: (
+                    quota[task_id],
+                    -TASK_IDS.index(task_id),
+                ),
+            )
+            quota[recipient] += 1
+        if sum(quota.values()) != count or quota["T2"] % 2:
+            raise LineageError(f"invalid task quota for {split}: {quota}")
         quotas[split] = quota
     return quotas
+
+
+def _largest_remainder_totals(
+    count: int, ratios: dict[str, float]
+) -> dict[str, int]:
+    raw = {name: count * float(ratio) for name, ratio in ratios.items()}
+    totals = {name: int(value) for name, value in raw.items()}
+    remainder = count - sum(totals.values())
+    order = sorted(ratios, key=lambda name: (raw[name] - totals[name], name), reverse=True)
+    for name in order[:remainder]:
+        totals[name] += 1
+    return totals
+
+
+def _pilot_mix_task_quotas(
+    task_quotas: dict[str, int],
+) -> dict[str, dict[str, int]]:
+    """Allocate an exact 50/40/10 train mix with even T2 category counts."""
+
+    total = sum(task_quotas.values())
+    category_targets = _largest_remainder_totals(total, PILOT_DIFFICULTY_MIX)
+    categories = tuple(PILOT_DIFFICULTY_MIX)
+    t2_total = task_quotas["T2"]
+    if t2_total % 2:
+        raise LineageError("pilot T2 quota must be even")
+
+    feasible_t2: list[tuple[float, tuple[int, ...]]] = []
+    for easy in range(0, t2_total + 1, 2):
+        for frontier in range(0, t2_total - easy + 1, 2):
+            hard = t2_total - easy - frontier
+            values = (easy, frontier, hard)
+            if any(values[index] > category_targets[name] for index, name in enumerate(categories)):
+                continue
+            error = sum(
+                (values[index] - t2_total * PILOT_DIFFICULTY_MIX[name]) ** 2
+                for index, name in enumerate(categories)
+            )
+            feasible_t2.append((error, values))
+    if not feasible_t2:
+        raise LineageError("no even T2 allocation satisfies the pilot difficulty mix")
+    _, chosen_t2 = min(feasible_t2, key=lambda item: (item[0], item[1]))
+
+    allocation = {
+        task_id: {name: 0 for name in categories} for task_id in TASK_IDS
+    }
+    allocation["T2"] = dict(zip(categories, chosen_t2))
+    remaining_rows = {
+        task_id: task_quotas[task_id]
+        for task_id in TASK_IDS
+        if task_id != "T2"
+    }
+    remaining_categories = {
+        name: category_targets[name] - allocation["T2"][name]
+        for name in categories
+    }
+    while sum(remaining_rows.values()):
+        candidates = [
+            (task_id, name)
+            for task_id, rows in remaining_rows.items()
+            if rows > 0
+            for name, needed in remaining_categories.items()
+            if needed > 0
+        ]
+        if not candidates:
+            raise LineageError("pilot difficulty quota allocation became infeasible")
+        task_id, name = max(
+            candidates,
+            key=lambda cell: (
+                task_quotas[cell[0]] * PILOT_DIFFICULTY_MIX[cell[1]]
+                - allocation[cell[0]][cell[1]],
+                remaining_categories[cell[1]],
+                -TASK_IDS.index(cell[0]),
+            ),
+        )
+        allocation[task_id][name] += 1
+        remaining_rows[task_id] -= 1
+        remaining_categories[name] -= 1
+
+    if any(remaining_categories.values()):
+        raise LineageError(f"unfilled pilot difficulty quotas: {remaining_categories}")
+    if any(sum(allocation[task].values()) != task_quotas[task] for task in TASK_IDS):
+        raise LineageError("pilot per-task difficulty quotas do not sum correctly")
+    if any(allocation["T2"][name] % 2 for name in categories):
+        raise LineageError("pilot T2 difficulty strata must preserve complete pairs")
+    return allocation
 
 
 def _split_stratified(
@@ -103,6 +209,7 @@ def _split_stratified(
     seed: int,
     *,
     rank_by_frontier: bool = True,
+    train_difficulty_mix: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in items:
@@ -112,6 +219,11 @@ def _split_stratified(
     split_items: dict[str, list[dict[str, Any]]] = {
         split: [] for split in split_counts
     }
+    pilot_train_quotas = (
+        _pilot_mix_task_quotas(task_quotas["train"])
+        if train_difficulty_mix
+        else None
+    )
 
     def unit_score(unit: list[dict[str, Any]]) -> float:
         return max(float(row["cfc"].get("frontier_score", 0.0)) for row in unit)
@@ -119,13 +231,15 @@ def _split_stratified(
     def allocate_units(
         units: list[list[dict[str, Any]]],
         quotas: dict[str, int],
+        *,
+        use_frontier_rank: bool = rank_by_frontier,
     ) -> dict[str, list[list[dict[str, Any]]]]:
         required = sum(quotas.values())
         if len(units) < required:
             raise LineageError(
                 f"only {len(units)} eligible units for {required} requested"
             )
-        if rank_by_frontier:
+        if use_frontier_rank:
             selected = sorted(units, key=unit_score, reverse=True)[:required]
             strata = min(10, required)
             for stratum in range(strata):
@@ -162,6 +276,45 @@ def _split_stratified(
                 f"difficulty-stratified allocation mismatch: {assigned} != {quotas}"
             )
         return allocated
+
+    def select_pilot_train_units(
+        units: list[list[dict[str, Any]]],
+        task_id: str,
+    ) -> tuple[list[list[dict[str, Any]]], list[list[dict[str, Any]]]]:
+        if pilot_train_quotas is None:
+            return [], units
+        row_quotas = pilot_train_quotas[task_id]
+        divisor = 2 if task_id == "T2" else 1
+        unit_quotas = {
+            name: count // divisor for name, count in row_quotas.items()
+        }
+        ordered = sorted(units, key=unit_score)
+        boundaries = (0, len(ordered) // 3, 2 * len(ordered) // 3, len(ordered))
+        buckets = {
+            "easy": ordered[boundaries[0] : boundaries[1]],
+            "frontier": ordered[boundaries[1] : boundaries[2]],
+            "hard_reachable": ordered[boundaries[2] : boundaries[3]],
+        }
+        selected: list[list[dict[str, Any]]] = []
+        selected_ids: set[int] = set()
+        for name in ("easy", "frontier", "hard_reachable"):
+            bucket = list(buckets[name])
+            needed = unit_quotas[name]
+            if len(bucket) < needed:
+                raise LineageError(
+                    f"{task_id} {name} has {len(bucket)} units for {needed} requested"
+                )
+            rng.shuffle(bucket)
+            chosen = bucket[:needed]
+            for unit in chosen:
+                selected_ids.add(id(unit))
+                for row in unit:
+                    row["selection_difficulty_stratum"] = name
+            selected.extend(chosen)
+        remaining = [unit for unit in units if id(unit) not in selected_ids]
+        if sum(len(unit) for unit in selected) != task_quotas["train"][task_id]:
+            raise LineageError(f"{task_id} pilot train quota mismatch")
+        return selected, remaining
 
     for task_id in TASK_IDS:
         values = by_task.get(task_id, [])
@@ -208,7 +361,22 @@ def _split_stratified(
                 split: task_quotas[split][task_id] for split in split_counts
             }
 
-        allocated = allocate_units(units, unit_quotas)
+        if train_difficulty_mix:
+            selected_train, remaining_units = select_pilot_train_units(units, task_id)
+            allocated = {split: [] for split in split_counts}
+            allocated["train"] = selected_train
+            remaining_quotas = {
+                split: count for split, count in unit_quotas.items() if split != "train"
+            }
+            if remaining_quotas:
+                remainder_allocated = allocate_units(
+                    remaining_units,
+                    remaining_quotas,
+                    use_frontier_rank=False,
+                )
+                allocated.update(remainder_allocated)
+        else:
+            allocated = allocate_units(units, unit_quotas)
         for split, selected_units in allocated.items():
             split_items[split].extend(
                 row for unit in selected_units for row in unit
@@ -287,6 +455,9 @@ def _training_row(
             "source_candidate_pool_sha256": candidate_pool_sha,
             "frontier_score": float(item["cfc"].get("frontier_score", 0.0)),
             "difficulty": float(item["cfc"].get("difficulty", 0.0)),
+            "selection_difficulty_stratum": str(
+                item.get("selection_difficulty_stratum", "not_applicable")
+            ),
             "oracle_solvable": bool(item["cfc"].get("oracle_solvable", False)),
             "protocol_version": "tmcd-v2",
             "schema_version": int(item["scenario"].get("schema_version", 4)),
@@ -322,6 +493,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--xplay-size", type=int, required=True)
     parser.add_argument("--seed", type=int, default=20260709)
     parser.add_argument("--train-batch-size", type=int, default=0)
+    parser.add_argument(
+        "--selection-policy",
+        choices=("formal_top_pool_rank_stratified", "pilot_balanced_50_40_10"),
+        default="formal_top_pool_rank_stratified",
+    )
     return parser.parse_args()
 
 
@@ -508,6 +684,7 @@ def main() -> None:
         split_counts,
         args.seed,
         rank_by_frontier=variant.frontier_filtering,
+        train_difficulty_mix=(args.selection_policy == "pilot_balanced_50_40_10"),
     )
     split_items["train"] = _task_batched_order(
         split_items["train"], args.train_batch_size, args.seed + 17
@@ -566,9 +743,13 @@ def main() -> None:
         "experiment_variant": variant_name,
         "frontier_filtering_enabled": bool(variant.frontier_filtering),
         "selection_policy": (
-            "security_cfc_top_pool_difficulty_stratified"
-            if variant.frontier_filtering
-            else "safety_valid_oracle_solvable_stratified_random"
+            args.selection_policy
+            if args.selection_policy == "pilot_balanced_50_40_10"
+            else (
+                "security_cfc_top_pool_difficulty_stratified"
+                if variant.frontier_filtering
+                else "safety_valid_oracle_solvable_stratified_random"
+            )
         ),
         "source_dca_checkpoint_manifest": str(dca_manifest_path),
         "source_dca_checkpoint_manifest_sha256": dca_manifest_sha,
@@ -593,7 +774,32 @@ def main() -> None:
         "split_task_counts": {
             split: dict(Counter(item["task_id"] for item in items)) for split, items in split_items.items()
         },
-        "difficulty_split_policy": "frontier_score_top_pool_then_rank_stratified",
+        "difficulty_split_policy": (
+            "per_task_score_tertiles_train_50_40_10_then_random_holdout"
+            if args.selection_policy == "pilot_balanced_50_40_10"
+            else "frontier_score_top_pool_then_rank_stratified"
+        ),
+        "train_difficulty_mix_target": (
+            PILOT_DIFFICULTY_MIX
+            if args.selection_policy == "pilot_balanced_50_40_10"
+            else None
+        ),
+        "train_difficulty_counts": dict(
+            Counter(
+                str(item.get("selection_difficulty_stratum", "not_applicable"))
+                for item in split_items["train"]
+            )
+        ),
+        "train_task_difficulty_counts": {
+            task_id: dict(
+                Counter(
+                    str(item.get("selection_difficulty_stratum", "not_applicable"))
+                    for item in split_items["train"]
+                    if item["task_id"] == task_id
+                )
+            )
+            for task_id in TASK_IDS
+        },
         "train_ordering": (
             f"task_batched_{args.train_batch_size}"
             if args.train_batch_size > 0

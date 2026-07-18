@@ -307,6 +307,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vda-rollout-n", type=int, default=1)
     parser.add_argument("--vda-max-turns", type=int, default=16)
     parser.add_argument("--vda-steps", type=int, default=75)
+    parser.add_argument(
+        "--vda-selection-policy",
+        choices=("formal_top_pool_rank_stratified", "pilot_balanced_50_40_10"),
+        default="formal_top_pool_rank_stratified",
+    )
+    parser.add_argument("--vda-learning-rate", type=float, default=2e-5)
+    parser.add_argument("--vda-kl-coef", type=float, default=0.0)
     parser.add_argument("--candidate-batch-size", type=int, default=4)
     parser.add_argument("--feedback-port", type=int, default=0)
     parser.add_argument(
@@ -358,6 +365,10 @@ def main() -> None:
         )
     if args.vda_max_turns <= 0:
         raise SystemExit("VDA max turns must be positive")
+    if args.vda_learning_rate <= 0:
+        raise SystemExit("VDA learning rate must be positive")
+    if args.vda_kl_coef < 0:
+        raise SystemExit("VDA KL coefficient cannot be negative")
 
     root = Path(args.root).resolve()
     model_path = args.model_path or os.environ.get(BACKBONE_ENV[args.backbone], "")
@@ -954,6 +965,8 @@ def main() -> None:
                     str(args.seed),
                     "--train-batch-size",
                     str(vda_generation_batch_size),
+                    "--selection-policy",
+                    args.vda_selection_policy,
                 ]
             )
             lineage = validate_round_lineage(
@@ -1103,7 +1116,11 @@ def main() -> None:
                         "AGZ_LORA_RANK": "16",
                         "AGZ_LORA_ALPHA": "32",
                         "AGZ_LORA_TARGET_MODULES": "[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]",
-                        "AGZ_ACTOR_LR": "2e-5",
+                        "AGZ_ACTOR_LR": str(args.vda_learning_rate),
+                        "AGZ_USE_KL_LOSS": (
+                            "true" if args.vda_kl_coef > 0 else "false"
+                        ),
+                        "AGZ_KL_LOSS_COEF": str(args.vda_kl_coef),
                         "AGZ_ACTOR_CPU_OFFLOAD": "false",
                         "AGZ_ACTOR_PARAM_OFFLOAD": "false",
                         "AGZ_ACTOR_OPTIMIZER_OFFLOAD": "false",
@@ -1240,7 +1257,10 @@ def main() -> None:
                     "actor_optimizer_offload": False,
                     "lora_rank": 16,
                     "lora_alpha": 32,
-                    "learning_rate": 2e-5,
+                    "learning_rate": args.vda_learning_rate,
+                    "pilot_selection_policy": args.vda_selection_policy,
+                    "use_kl_loss": args.vda_kl_coef > 0,
+                    "kl_loss_coef": args.vda_kl_coef,
                     "seed": args.seed,
                 },
             )

@@ -82,11 +82,19 @@ def audit_pool(
         actual_counts[split] = len(frame)
         if len(frame) != expected:
             raise ValueError(f"{split} has {len(frame)} rows, expected {expected}")
-        if expected % len(TASK_IDS):
-            raise ValueError(f"{split} size is not divisible across T1-T4")
-        expected_task_count = expected // len(TASK_IDS)
         task_counts = Counter(str(value) for value in frame["task_id"])
-        expected_tasks = {task_id: expected_task_count for task_id in TASK_IDS}
+        expected_tasks = {
+            str(task_id): int(count)
+            for task_id, count in (
+                (manifest.get("split_task_counts", {}) or {}).get(split, {}) or {}
+            ).items()
+        }
+        if set(expected_tasks) != set(TASK_IDS) or sum(expected_tasks.values()) != expected:
+            raise ValueError(f"{split} manifest task quotas are invalid: {expected_tasks}")
+        if max(expected_tasks.values()) - min(expected_tasks.values()) > 2:
+            raise ValueError(f"{split} task quotas are not approximately balanced")
+        if expected_tasks["T2"] % 2:
+            raise ValueError(f"{split} T2 quota must be even")
         if dict(task_counts) != expected_tasks:
             raise ValueError(
                 f"{split} task counts mismatch: {dict(task_counts)} != {expected_tasks}"
