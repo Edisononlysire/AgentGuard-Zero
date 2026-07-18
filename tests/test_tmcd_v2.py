@@ -77,6 +77,11 @@ from scripts.generate_dca_scenarios import (
     DCA_CANDIDATE_NORMALIZATION_VERSION,
     _candidate_record,
     _canonicalize_candidate_identity,
+    _load_partial,
+)
+from scripts.generate_final_heldout import (
+    select_heldout,
+    semantic_overlap_fingerprint,
 )
 from scripts.merge_dca_candidate_shards import merge_candidate_shards
 from scripts.prune_gate_recovery_checkpoint import prune_gate_recovery
@@ -609,6 +614,10 @@ class TMCDV2DatasetTests(unittest.TestCase):
     def test_training_ablation_registry_is_complete(self) -> None:
         expected = {
             "full",
+            "static_train",
+            "verification_tools",
+            "active_probing",
+            "state_aware",
             "no_dca_training",
             "no_frontier_filtering",
             "no_active_probing",
@@ -621,6 +630,65 @@ class TMCDV2DatasetTests(unittest.TestCase):
         self.assertFalse(experiment_variant("no_dca_training").train_dca)
         self.assertFalse(
             experiment_variant("no_frontier_filtering").frontier_filtering
+        )
+        static = experiment_variant("static_train")
+        self.assertFalse(static.train_dca)
+        self.assertFalse(static.frontier_filtering)
+        self.assertFalse(static.active_probing)
+        self.assertFalse(static.passive_verification)
+        self.assertFalse(static.state_layer)
+        self.assertFalse(static.trust_recalibration)
+
+    def test_static_train_prompt_removes_disabled_capabilities(self) -> None:
+        prompt = vda_system_prompt_v4("static_train")
+        for tool in ACTIVE_PROBE_TOOLS | PASSIVE_VERIFICATION_TOOLS:
+            self.assertNotIn(tool, prompt)
+        self.assertIn("trust_operation must be null", prompt)
+        self.assertIn("memory_operation must be null", prompt)
+        self.assertIn("memory_use must be null", prompt)
+        self.assertIn("persistent Defender State Layer is unavailable", prompt)
+
+    def test_static_train_runtime_override_does_not_mutate_scenario(self) -> None:
+        scenario = task_example_v2(TASK_FOCI[0])
+        original = copy.deepcopy(scenario)
+        with mock.patch.dict(os.environ, {"AGZ_EXPERIMENT_VARIANT": "static_train"}):
+            env = CyberDefenseEnvV2(scenario)
+        self.assertEqual(scenario, original)
+        self.assertEqual(env.experiment_variant, "static_train")
+        self.assertFalse(env.state_layer_enabled)
+
+    def test_heldout_selection_is_seeded_and_frontier_independent(self) -> None:
+        records = []
+        for focus in TASK_FOCI:
+            for index in range(2):
+                scenario = task_example_v2(focus)
+                scenario["scenario_id"] = f"heldout-{focus[:2]}-{index}"
+                scenario["defense_constraints"]["business_budget"] += index * 0.125
+                if scenario.get("scenario_family") == "trust_betrayal":
+                    scenario["prefix_hash"] = public_prefix_hash(scenario)
+                records.append(
+                    {
+                        "task_focus": focus,
+                        "parse_ok": True,
+                        "scenario": scenario,
+                        "scenario_fingerprint": scenario_fingerprint(scenario),
+                    }
+                )
+        first, rejected, eligible = select_heldout(records, set(), set(), 1, 17)
+        second, _, _ = select_heldout(records, set(), set(), 1, 17)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 4)
+        self.assertEqual(eligible, {"T1": 2, "T2": 2, "T3": 2, "T4": 2})
+        self.assertFalse(rejected)
+
+    def test_semantic_overlap_hash_ignores_only_identity_metadata(self) -> None:
+        first = task_example_v2(TASK_FOCI[0])
+        second = copy.deepcopy(first)
+        second["scenario_id"] = "another-id"
+        second["metadata"] = {"task_id": "T1", "generation_seed": 99}
+        self.assertEqual(
+            semantic_overlap_fingerprint(first),
+            semantic_overlap_fingerprint(second),
         )
 
     def test_action_space_ablation_prompts_remove_disabled_tools(self) -> None:
@@ -907,6 +975,18 @@ class TMCDV2DatasetTests(unittest.TestCase):
             DCA_CANDIDATE_NORMALIZATION_VERSION,
             4,
         )
+
+    def test_candidate_partial_accepts_legacy_missing_task_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "candidate.partial.jsonl"
+            legacy = {"checkpoint_manifest_sha256": "abc", "num_candidates": 8}
+            path.write_text(
+                json.dumps({"kind": "meta", "config": legacy}) + "\n",
+                encoding="utf-8",
+            )
+            expected = dict(legacy)
+            expected["task_id"] = None
+            self.assertEqual(_load_partial(path, expected), {})
 
     def test_candidate_merge_preserves_generation_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

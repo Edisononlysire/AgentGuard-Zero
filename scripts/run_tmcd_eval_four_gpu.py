@@ -9,6 +9,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agentguard_zero.inference_contract import FORMAL_VDA_MAX_NEW_TOKENS  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(ROOT / "outputs" / "tmcd_eval"))
     parser.add_argument("--model-path", default="")
     parser.add_argument("--adapter-path", default="")
+    parser.add_argument("--ecrg-config", default="")
     parser.add_argument("--model-backend", default="hf")
     parser.add_argument("--candidate-count", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
@@ -26,7 +31,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-turns", type=int, default=16)
     parser.add_argument("--trajectory-batch-size", type=int, default=16)
     parser.add_argument("--max-input-tokens", type=int, default=2048)
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument(
+        "--max-new-tokens", type=int, default=FORMAL_VDA_MAX_NEW_TOKENS
+    )
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=0)
+    parser.add_argument("--dtype", choices=["auto", "bf16", "fp16", "fp32"], default="bf16")
+    parser.add_argument(
+        "--attn-implementation",
+        choices=["auto", "eager", "sdpa", "flash_attention_2"],
+        default="sdpa",
+    )
     parser.add_argument("--seed", type=int, default=20260708)
     return parser.parse_args()
 
@@ -58,6 +74,11 @@ def main() -> None:
             "--trajectory_batch_size", str(args.trajectory_batch_size),
             "--max_input_tokens", str(args.max_input_tokens),
             "--max_new_tokens", str(args.max_new_tokens),
+            "--temperature", str(args.temperature),
+            "--top_p", str(args.top_p),
+            "--top_k", str(args.top_k),
+            "--dtype", args.dtype,
+            "--attn_implementation", args.attn_implementation,
             "--seed", str(args.seed),
             "--num_shards", "4",
             "--shard_index", str(shard_index),
@@ -66,6 +87,8 @@ def main() -> None:
             command.extend(["--model_path", args.model_path])
         if args.adapter_path:
             command.extend(["--adapter_path", args.adapter_path])
+        if args.ecrg_config:
+            command.extend(["--ecrg_config", args.ecrg_config])
         environment = os.environ.copy()
         environment["CUDA_VISIBLE_DEVICES"] = gpu_id
         cache_dir = (

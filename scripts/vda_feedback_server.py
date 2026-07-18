@@ -352,6 +352,20 @@ class FeedbackEngine:
             for row in output
         ]
 
+    def _generate_in_chunks(
+        self, message_batches: list[list[dict[str, str]]]
+    ) -> list[str]:
+        """Generate every prompt in stable order while bounding peak GPU memory."""
+        batch_size = int(self.args.generation_batch_size)
+        if batch_size <= 0 or len(message_batches) <= batch_size:
+            return self._generate_batch(message_batches)
+        outputs: list[str] = []
+        for start in range(0, len(message_batches), batch_size):
+            outputs.extend(
+                self._generate_batch(message_batches[start : start + batch_size])
+            )
+        return outputs
+
     def _run_many(self, scenarios: list[dict[str, Any]], start_index: int) -> list[dict[str, Any]]:
         store = Level1RolloutStore(invalid_penalty=self.args.invalid_penalty)
         states: list[dict[str, Any]] = []
@@ -390,7 +404,7 @@ class FeedbackEngine:
             ]
             if not active:
                 break
-            raw_outputs = self._generate_batch(
+            raw_outputs = self._generate_in_chunks(
                 [_generation_messages(states[index]) for index in active]
             )
             selected_values = []
@@ -652,6 +666,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-input-tokens", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument(
+        "--generation-batch-size",
+        type=int,
+        default=int(os.environ.get("AGZ_VDA_FEEDBACK_GENERATION_BATCH_SIZE", "0")),
+        help=(
+            "Maximum prompts per feedback-model forward pass; 0 keeps the legacy "
+            "unbounded batch. Chunking preserves every scenario and its order."
+        ),
+    )
+    parser.add_argument(
         "--continuation-prompt-mode",
         choices=["legacy", "snapshot"],
         default=os.environ.get(
@@ -691,6 +714,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--invalid-action-patience must be non-negative")
     if args.history_window < 0:
         parser.error("--history-window must be non-negative")
+    if args.generation_batch_size < 0:
+        parser.error("--generation-batch-size must be non-negative")
 
     # Namespace fields shared with scripts/eval_level1_select.py.
     args.model_path = args.model_path

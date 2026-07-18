@@ -34,7 +34,11 @@ def main() -> None:
     results_by_id = {}
     for shard_dir in shard_dirs:
         config = json.loads((shard_dir / "run_config.json").read_text(encoding="utf-8"))
-        comparable = {key: value for key, value in config.items() if key != "shard_index"}
+        comparable = {
+            key: value
+            for key, value in config.items()
+            if key not in {"shard_index", "torch_seed"}
+        }
         if common_config is None:
             common_config = comparable
         elif comparable != common_config:

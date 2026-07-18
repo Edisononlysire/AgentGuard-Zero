@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as _dt
+import hashlib
 import json
 import math
 import os
@@ -35,13 +36,24 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 import eval_level1_select as base
-from agentguard_zero.governance.v5c import score_v5c_candidate, select_v5c_json
+from agentguard_zero.governance.v5c import (
+    safe_probe_fallback,
+    score_v5c_candidate,
+    select_v5c_json,
+)
+from agentguard_zero.inference_contract import (
+    FORMAL_VDA_MAX_NEW_TOKENS,
+    GENERIC_EVAL_PROMPT_CONTRACT,
+    TRAINED_VDA_PROMPT_CONTRACT,
+    require_candidate_quality,
+)
 from agentguard_zero.schemas.action_schema_v4 import DEFAULT_ACTION_PACKET_V4, parse_action_json_v4
 from agentguard_zero.tools.business_impact import estimate_business_impact
 from agentguard_zero.training.vda_dataset import scenario_horizon, scenario_to_training_row
 from agentguard_zero.protocol import PRIVILEGED_METADATA_FIELDS
 from level1_rollout_server import Level1RolloutStore
-from vda_feedback_server import _generation_messages, _history_summary
+from vda_feedback_server import _generation_messages, _history_summary, _instruction_messages
+from ecrg_calibration_lib import admission_allowed, candidate_features, ranking_score
 
 
 SYSTEMS = [
@@ -121,6 +133,14 @@ TRAINED_K_CONTROLS = {
     "agentguard_zero_train_random_k",
     "agentguard_zero_train_mitigation_best_of_k",
     "agentguard_zero_train_soft_v5c",
+}
+
+TRAINED_VDA_PROMPT_SYSTEMS = {
+    "agentguard_zero_train",
+    "agentguard_zero_train_random_k",
+    "agentguard_zero_train_mitigation_best_of_k",
+    "agentguard_zero_train_soft_v5c",
+    "agentguard_zero_full",
 }
 
 
@@ -522,6 +542,22 @@ def prepend_system_prompt(messages: list[dict[str, str]], content: str) -> list[
     return [{"role": "system", "content": content}] + messages
 
 
+def inference_prompt_contract(system: str) -> str:
+    if system in TRAINED_VDA_PROMPT_SYSTEMS:
+        return TRAINED_VDA_PROMPT_CONTRACT
+    return GENERIC_EVAL_PROMPT_CONTRACT
+
+
+def apply_inference_prompt_contract(
+    messages: list[dict[str, str]], system: str
+) -> list[dict[str, str]]:
+    """Preserve the exact training row for trained VDA checkpoints."""
+
+    if inference_prompt_contract(system) == TRAINED_VDA_PROMPT_CONTRACT:
+        return messages
+    return prepend_system_prompt(messages, system_prompt(system))
+
+
 def system_prompt(system: str) -> str:
     common = (
         "Return compact strict JSON only. Do not include markdown, prose, code, payloads, "
@@ -708,6 +744,176 @@ def candidate_scoring_mode(system: str, requested: str) -> str:
     return requested
 
 
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_json(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def load_frozen_ecrg_config(path: str | Path) -> dict[str, Any]:
+    config_path = Path(path).resolve()
+    if not config_path.is_file():
+        raise ValueError(f"frozen ECRG config does not exist: {config_path}")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    required_flags = {
+        "status": "frozen",
+        "paper_name": "ECRG",
+        "code_name": "V5-C",
+        "candidate_count": 6,
+        "feature_access": "public_evidence_trust_memory_business_only",
+        "hidden_state_access": False,
+        "parameter_training": False,
+        "vda_parameter_update": False,
+        "dca_parameter_update": False,
+        "prompt_contract": TRAINED_VDA_PROMPT_CONTRACT,
+        "max_new_tokens": FORMAL_VDA_MAX_NEW_TOKENS,
+    }
+    mismatches = {
+        key: {"expected": expected, "actual": config.get(key)}
+        for key, expected in required_flags.items()
+        if config.get(key) != expected
+    }
+    if mismatches:
+        raise ValueError(f"invalid frozen ECRG config invariants: {mismatches}")
+    require_candidate_quality(
+        config.get("candidate_quality", {}), context="frozen ECRG config"
+    )
+    parameters = config.get("parameters")
+    if not isinstance(parameters, dict):
+        raise ValueError("frozen ECRG config is missing parameters")
+    for key in (
+        "hard_admission_thresholds",
+        "ranking_weights",
+        "safe_probe_fallback_trigger",
+    ):
+        if not isinstance(parameters.get(key), dict):
+            raise ValueError(f"frozen ECRG config is missing parameters.{key}")
+    value = copy.deepcopy(config)
+    value["_path"] = str(config_path)
+    value["_sha256"] = sha256_file(config_path)
+    return value
+
+
+def select_frozen_ecrg_candidate(
+    public_context: dict[str, Any],
+    raw_candidates: list[str],
+    config: dict[str, Any],
+) -> base.Candidate:
+    """Apply the frozen calibrated ECRG using public-state features only."""
+
+    parameters = config["parameters"]
+    thresholds = parameters["hard_admission_thresholds"]
+    weights = parameters["ranking_weights"]
+    fallback_trigger = parameters["safe_probe_fallback_trigger"]
+    candidate_rows = []
+    feature_rows = []
+    base_scored = []
+    ranked = []
+    for index, text in enumerate(raw_candidates):
+        features, scored = candidate_features(public_context, text, index=index)
+        feature_rows.append(features)
+        base_scored.append(scored)
+        admitted = admission_allowed(features, thresholds)
+        score = math.nan
+        worst = math.nan
+        if admitted:
+            score, worst = ranking_score(features, weights)
+            ranked.append((worst, score, -index, index, text, scored))
+        candidate_rows.append(
+            {
+                "index": index,
+                "parse_ok": bool(features.get("parse_ok")),
+                "base_admissible": bool(features.get("base_admissible")),
+                "calibrated_admissible": bool(admitted),
+                "hard_violations": list(features.get("hard_violations", [])),
+                "calibrated_score": None if math.isnan(score) else float(score),
+                "calibrated_worst_case_utility": None if math.isnan(worst) else float(worst),
+            }
+        )
+
+    diagnostics: dict[str, Any] = {
+        "selector": "ecrg_frozen_config",
+        "paper_name": "ECRG",
+        "code_name": "V5-C",
+        "feature_access": "public_only",
+        "hidden_state_access": False,
+        "ecrg_config_sha256": config["_sha256"],
+        "candidate_count": len(raw_candidates),
+        "candidates": candidate_rows,
+        "hard_gate_enforced": True,
+    }
+
+    if not ranked:
+        packet, fallback = safe_probe_fallback(public_context, base_scored)
+        diagnostics.update(fallback)
+        diagnostics.update(
+            {
+                "selected_index": -1,
+                "selection_reason": "empty_admissible_set",
+                "fallback": True,
+            }
+        )
+        text = json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
+        parsed, ok, message = parse_action_json_v4(text)
+        return base.Candidate(text, parsed, ok, message, 0.0, diagnostics)
+
+    ranked.sort(reverse=True, key=lambda item: item[:3])
+    worst, score, _, index, text, selected = ranked[0]
+    public_risk = max(
+        (float(features.get("risk_signal", 0.0)) for features in feature_rows),
+        default=0.0,
+    )
+    if (
+        worst < float(fallback_trigger["score_floor"])
+        and public_risk >= float(fallback_trigger["risk_floor"])
+    ):
+        packet, fallback = safe_probe_fallback(public_context, base_scored)
+        diagnostics.update(fallback)
+        diagnostics.update(
+            {
+                "selected_index": -1,
+                "selected_score": float(score),
+                "selected_worst_case_utility": float(worst),
+                "selection_reason": "calibrated_safe_probe_trigger",
+                "fallback": True,
+            }
+        )
+        fallback_text = json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
+        parsed, ok, message = parse_action_json_v4(fallback_text)
+        return base.Candidate(fallback_text, parsed, ok, message, float(worst), diagnostics)
+
+    diagnostics.update(
+        {
+            "selected_index": int(index),
+            "selected_score": float(score),
+            "selected_worst_case_utility": float(worst),
+            "selection_reason": "ranked_admissible_candidate",
+            "fallback": False,
+        }
+    )
+    return base.Candidate(
+        text,
+        selected.packet,
+        selected.parse_ok,
+        selected.parse_message,
+        float(worst),
+        diagnostics,
+    )
+
+
 def select_runtime_candidate(
     system: str,
     public_context: dict[str, Any],
@@ -716,6 +922,7 @@ def select_runtime_candidate(
     *,
     selector_mode: str,
     seed: int = 20260709,
+    ecrg_config: dict[str, Any] | None = None,
 ) -> base.Candidate:
     observation = v2_observation(public_context)
     if observation is not None and system == "agentguard_zero_train_random_k":
@@ -776,7 +983,15 @@ def select_runtime_candidate(
             selected.worst_case_utility,
             diagnostics,
         )
-    if observation is not None and system in {"agentguard_zero_select", "agentguard_zero_full"}:
+    if observation is not None and system == "agentguard_zero_full":
+        if not ecrg_config:
+            raise ValueError("AgentGuard-Zero-Full requires a frozen ECRG config")
+        return select_frozen_ecrg_candidate(
+            public_context,
+            raw_candidates,
+            ecrg_config,
+        )
+    if observation is not None and system == "agentguard_zero_select":
         selected_text, diagnostics = select_v5c_json(public_context, raw_candidates)
         packet, ok, message = parse_action_json_v4(selected_text)
         return base.Candidate(
@@ -822,7 +1037,7 @@ def row_context(row: dict[str, Any], row_index: int, args: argparse.Namespace) -
         row = {**row, **rebuilt}
         extra = base.scenario_extra_from_row(row)
     messages, public_context = base.sanitize_initial_messages(base.as_messages(row.get("problem", "")))
-    messages = prepend_system_prompt(messages, system_prompt(args.system))
+    messages = apply_inference_prompt_contract(messages, args.system)
     scenario_id = str(extra.get("scenario_id", row.get("scenario_id", f"row-{row_index}")))
     max_env_steps = int(extra.get("max_env_steps", args.max_turns))
     budget = base.safe_float(scenario.get("defense_constraints", {}).get("business_budget", 5.0), 5.0)
@@ -909,10 +1124,17 @@ def run_model_one(row: dict[str, Any], row_index: int, backend: Any, args: argpa
             policy,
             selector_mode=args.selector_mode,
             seed=args.seed,
+            ecrg_config=getattr(args, "ecrg_config_data", None),
         )
         selected_actions.append(
             {
                 "turn": turn,
+                "public_state_sha256": sha256_json(public_context),
+                "raw_candidates": list(raw_candidates),
+                "raw_candidate_sha256": [
+                    hashlib.sha256(item.encode("utf-8")).hexdigest()
+                    for item in raw_candidates
+                ],
                 "selected_text": selected.text,
                 "selected_packet": selected.packet,
                 "selected_ok": selected.ok,
@@ -969,6 +1191,9 @@ def run_model_many(
                 "row": row,
                 "row_index": row_index,
                 "initial_messages": messages,
+                "instruction_messages": _instruction_messages(messages),
+                "continuation_prompt_mode": "snapshot",
+                "history_window": 8,
                 "public_context": public_context,
                 "history": [],
                 "extra": extra,
@@ -1017,11 +1242,18 @@ def run_model_many(
                 policy,
                 selector_mode=args.selector_mode,
                 seed=args.seed,
+                ecrg_config=getattr(args, "ecrg_config_data", None),
             )
             selected_values.append(selected)
             state["selected_actions"].append(
                 {
                     "turn": turn,
+                    "public_state_sha256": sha256_json(state["public_context"]),
+                    "raw_candidates": list(raw_candidates),
+                    "raw_candidate_sha256": [
+                        hashlib.sha256(item.encode("utf-8")).hexdigest()
+                        for item in raw_candidates
+                    ],
                     "selected_text": selected.text,
                     "selected_packet": selected.packet,
                     "selected_ok": selected.ok,
@@ -1221,6 +1453,31 @@ def load_rows(path: str, split: str, limit: int | None, seed: int, offset: int =
 
 def summarize(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
     n = len(results)
+    task_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in results:
+        task_groups.setdefault(str(item.get("task", "unknown")), []).append(item)
+
+    def task_entries(prefix: str) -> list[dict[str, Any]]:
+        return [
+            item
+            for task, entries in task_groups.items()
+            if task.startswith(prefix)
+            for item in entries
+        ]
+
+    def metric_mean(entries: list[dict[str, Any]], name: str) -> float:
+        return mean(
+            [base.safe_float(item.get("tmcd_metrics", {}).get(name, 0.0), 0.0) for item in entries]
+        )
+
+    def macro_task_metric(name: str) -> float:
+        values = [metric_mean(entries, name) for entries in task_groups.values() if entries]
+        return mean(values)
+
+    t1_results = task_entries("T1 ")
+    t2_results = task_entries("T2 ")
+    t3_results = task_entries("T3 ")
+    t4_results = task_entries("T4 ")
     action_count = sum(max(1, len(item.get("selected_actions", []))) for item in results)
     raw_candidate_count = 0
     raw_candidate_json_failures = 0
@@ -1238,7 +1495,7 @@ def summarize(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[s
 
     betrayal_values = [
         value
-        for item in results
+        for item in t2_results
         for value in [item.get("tmcd_metrics", {}).get("betrayal_detection", math.nan)]
         if not math.isnan(float(value))
     ]
@@ -1261,21 +1518,21 @@ def summarize(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[s
         "num_scenarios": n,
         "candidate_count": default_candidate_count(args.system, args.candidate_count) if args.system in MODEL_SYSTEMS else 1,
         "selector_mode": effective_selector_mode(args.system, args.selector_mode),
+        "ecrg_config": getattr(args, "ecrg_config", "") if args.system == "agentguard_zero_full" else "",
+        "ecrg_config_sha256": getattr(args, "ecrg_config_sha256", "") if args.system == "agentguard_zero_full" else "",
         "offset": args.offset,
-        "safe_utility": mean([item["tmcd_metrics"]["safe_utility"] for item in results]),
+        "safe_utility": macro_task_metric("safe_utility"),
         "trajectory_reward": mean([base.safe_float(item["score"].get("reward", 0.0), 0.0) for item in results]),
         "safe_success_rate": mean([float(bool(item["score"].get("safe_success", False))) for item in results]),
         "attack_mitigation": mean([item["tmcd_metrics"]["attack_mitigation"] for item in results]),
         "attack_success": mean([float(bool(item["score"].get("attack_success", False))) for item in results]),
         "intent_accuracy": mean([float(bool(item["score"].get("correct_intent", False))) for item in results]),
         "betrayal_detection": mean([float(v) for v in betrayal_values]) if betrayal_values else math.nan,
-        "poison_success": mean([item["tmcd_metrics"]["poison_success"] for item in results]),
-        "business_cost": mean([item["tmcd_metrics"]["business_cost"] for item in results]),
+        "poison_success": metric_mean(t3_results, "poison_success"),
+        "business_cost": macro_task_metric("business_cost"),
         "verification_cost": mean([item["tmcd_metrics"]["verification_cost"] for item in results]),
-        "probe_yield": mean([item["tmcd_metrics"].get("probe_yield", 0.0) for item in results]),
-        "probe_result_availability_rate": mean(
-            [item["tmcd_metrics"].get("probe_result_availability", 0.0) for item in results]
-        ),
+        "probe_yield": metric_mean(t1_results, "probe_yield"),
+        "probe_result_availability_rate": metric_mean(t1_results, "probe_result_availability"),
         "decision_delay": mean(
             [item["tmcd_metrics"].get("decision_delay", 0.0) for item in results]
         ),
@@ -1290,7 +1547,7 @@ def summarize(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[s
         ),
         "memory_recovery": mean([item["tmcd_metrics"].get("memory_recovery", 0.0) for item in results]),
         "claim_trust_brier": mean([item["tmcd_metrics"].get("trust_brier", 0.0) for item in results]),
-        "overresponse_rate": mean([item["tmcd_metrics"]["overresponse"] for item in results]),
+        "overresponse_rate": metric_mean(t4_results, "overresponse"),
         "json_parse_failure_rate": sum(item["selected_json_parse_failures"] for item in results) / max(1, action_count),
         "raw_candidate_json_parse_failure_rate": raw_candidate_json_failures / max(1, raw_candidate_count),
         "selector_fallback_rate": selector_fallbacks / max(1, action_count),
@@ -1299,11 +1556,20 @@ def summarize(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[s
         "invalid_response_action_rate": sum(item["selected_invalid_response_actions"] for item in results) / max(1, action_count),
         "avg_steps": mean([float(item.get("steps", 0)) for item in results]),
     }
-    task_groups: dict[str, list[dict[str, Any]]] = {}
-    for item in results:
-        task_groups.setdefault(str(item.get("task", "unknown")), []).append(item)
     summary["task_safe_utility"] = {
         task: mean([entry["tmcd_metrics"]["safe_utility"] for entry in entries])
+        for task, entries in sorted(task_groups.items())
+    }
+    summary["task_metrics"] = {
+        task: {
+            "num_scenarios": len(entries),
+            "safe_utility": metric_mean(entries, "safe_utility"),
+            "probe_yield": metric_mean(entries, "probe_yield") if task.startswith("T1 ") else math.nan,
+            "betrayal_detection": metric_mean(entries, "betrayal_detection") if task.startswith("T2 ") else math.nan,
+            "poison_success": metric_mean(entries, "poison_success") if task.startswith("T3 ") else math.nan,
+            "overresponse": metric_mean(entries, "overresponse") if task.startswith("T4 ") else math.nan,
+            "business_cost": metric_mean(entries, "business_cost"),
+        }
         for task, entries in sorted(task_groups.items())
     }
     return summary
@@ -1357,6 +1623,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model_path", default=os.environ.get("AGZ_MODEL_PATH", ""))
     parser.add_argument("--adapter_path", default=os.environ.get("AGZ_ADAPTER_PATH", ""))
+    parser.add_argument("--ecrg_config", default=os.environ.get("AGZ_ECRG_CONFIG", ""))
     parser.add_argument("--model_backend", choices=["hf", "mock", "api"], default=os.environ.get("AGZ_MODEL_BACKEND", "hf"))
     parser.add_argument("--candidate_count", type=int, default=int(os.environ.get("AGZ_CANDIDATE_COUNT", "4")))
     parser.add_argument("--limit", type=int, default=int(os.environ.get("AGZ_EVAL_LIMIT", "16")))
@@ -1373,7 +1640,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_turns", type=int, default=int(os.environ.get("AGZ_AGENT_MAX_TURNS", "5")))
     parser.add_argument("--invalid_penalty", type=float, default=float(os.environ.get("AGZ_INVALID_PENALTY", "0.5")))
     parser.add_argument("--max_input_tokens", type=int, default=int(os.environ.get("AGZ_MAX_INPUT_TOKENS", "2048")))
-    parser.add_argument("--max_new_tokens", type=int, default=int(os.environ.get("AGZ_MAX_NEW_TOKENS", "256")))
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=int(
+            os.environ.get("AGZ_MAX_NEW_TOKENS", str(FORMAL_VDA_MAX_NEW_TOKENS))
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=float(os.environ.get("AGZ_TEMPERATURE", "0.7")))
     parser.add_argument("--top_p", type=float, default=float(os.environ.get("AGZ_TOP_P", "1.0")))
     parser.add_argument("--top_k", type=int, default=int(os.environ.get("AGZ_TOP_K", "0")))
@@ -1410,7 +1683,29 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     random.seed(args.seed)
+    args.torch_seed = int(args.seed + args.shard_index * 1_000_003)
+    try:
+        import torch
+
+        torch.manual_seed(args.torch_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.torch_seed)
+    except ImportError:
+        pass
     resolve_model_path(args)
+    args.ecrg_config_data = None
+    args.ecrg_config_sha256 = ""
+    if args.system == "agentguard_zero_full":
+        if not args.ecrg_config:
+            raise SystemExit("AgentGuard-Zero-Full requires --ecrg_config.")
+        args.ecrg_config_data = load_frozen_ecrg_config(args.ecrg_config)
+        args.ecrg_config = args.ecrg_config_data["_path"]
+        args.ecrg_config_sha256 = args.ecrg_config_data["_sha256"]
+        if args.candidate_count != int(args.ecrg_config_data["candidate_count"]):
+            raise SystemExit(
+                "AgentGuard-Zero-Full candidate_count must match the frozen "
+                f"ECRG value {args.ecrg_config_data['candidate_count']}."
+            )
     if args.system in MODEL_SYSTEMS and args.model_backend == "hf" and not args.model_path:
         raise SystemExit(f"{args.system} requires --model_path or AGZ_MODEL_PATH.")
     rows = load_rows(args.data, split=args.split, limit=args.limit, seed=args.seed, offset=args.offset, task_filter=args.task_filter)
@@ -1432,19 +1727,27 @@ def main() -> None:
         "run_name": args.run_name,
         "data": str(Path(args.data).resolve()),
         "system": args.system,
+        "prompt_contract": inference_prompt_contract(args.system),
         "model_backend": args.model_backend,
         "api_model": args.api_model,
         "model_path": str(Path(args.model_path).resolve()) if args.model_path else "",
         "adapter_path": str(Path(args.adapter_path).resolve()) if args.adapter_path else "",
+        "ecrg_config": args.ecrg_config if args.system == "agentguard_zero_full" else "",
+        "ecrg_config_sha256": args.ecrg_config_sha256 if args.system == "agentguard_zero_full" else "",
         "candidate_count": args.candidate_count,
         "selector_mode": args.selector_mode,
         "seed": args.seed,
+        "torch_seed": args.torch_seed,
         "max_turns": args.max_turns,
+        "trajectory_batch_size": args.trajectory_batch_size,
         "max_input_tokens": args.max_input_tokens,
         "max_new_tokens": args.max_new_tokens,
         "temperature": args.temperature,
         "top_p": args.top_p,
         "top_k": args.top_k,
+        "dtype": args.dtype,
+        "attn_implementation": args.attn_implementation,
+        "stop_on_complete_json": bool(args.stop_on_complete_json),
         "num_shards": args.num_shards,
         "shard_index": args.shard_index,
         "offset": args.offset,

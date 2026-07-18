@@ -16,19 +16,27 @@ paper result artifacts. It contains the method, example launchers, and
 experiment code needed to inspect and reproduce the pipeline with separately
 obtained models and compute.
 
-## Method At A Glance
+> **Recovery status (2026-07-18):** the original pure on-policy three-round
+> lineage failed the action-support and output-contract audits. VDA2/VDA3 and
+> DCA2/DCA3 are excluded from formal results. The active protocol is now
+> [Action-Support Bootstrapped Co-evolution](docs/ACTION_SUPPORT_RECOVERY.md).
+> No recovery training may start until its fail-closed Stage-0 and Gate-A/B
+> checks pass. `Zero` means zero human-labelled optimal defence actions; the
+> cold-start targets are generated and verified by the simulator.
+
+## Recovery Method At A Glance
 
 ```text
-DCA_r proposes 4,000 scenarios
-  -> VDA_r rollout feedback
-  -> train independent DCA_{r+1} LoRA
-  -> DCA_{r+1} generates 10,000 new candidates
-  -> safety + validity + solvability + security-CFC curriculum filtering
-  -> train/dev/xplay = 2,400/400/800
-  -> train independent VDA_{r+1} LoRA
+200-scenario fixed-policy learnability gate
+  -> public-state robust teacher (no human action labels)
+  -> identical Bootstrap SFT pilot on Base and VDA1
+  -> K=1 greedy Gate A and initialization selection
+  -> one DAgger correction pass
+  -> 10-step RL Gate B with adaptive G=2->4, replay, and KL
+  -> teacher review before static-skill RL or a fresh DCA0
 ```
 
-The process runs for three rounds independently on Qwen3.5-4B and Qwen3.5-9B.
+The historical process ran for three rounds independently on Qwen3.5-4B and Qwen3.5-9B.
 DCA and VDA share a frozen backbone architecture but never share adapters.
 Every batch and checkpoint is hashed, role-labelled, and linked to its parent.
 The DCA update is conditioned on current-VDA rollout feedback. The fresh VDA
@@ -48,7 +56,10 @@ payloads, exploit real systems, or execute network attacks.
 | Path | Purpose |
 |---|---|
 | `agentguard_zero/` | schemas, simulator, memory, rewards, tools, lineage |
-| `scripts/run_dca_first_round.py` | authoritative resumable one-round pipeline |
+| `agentguard_zero/recovery/` | robust teacher, bootstrap builder, gates, dynamic sampling |
+| `configs/recovery/action_support_bootstrap_v1.json` | frozen recovery protocol |
+| `docs/ACTION_SUPPORT_RECOVERY.md` | active recovery lineage and execution gates |
+| `scripts/run_dca_first_round.py` | historical failed-lineage reproduction launcher |
 | `scripts/run_three_rounds.py` | serial three-round launcher for one backbone |
 | `scripts/eval_tmcd_systems.py` | baselines, Train, Select, and Train+V5-C evaluation |
 | `agentguard_zero/governance/v5c.py` | V5-C hard admission and public-state robust ranking |
@@ -86,29 +97,35 @@ export AGZ_QWEN35_9B_PATH=/path/to/Qwen3.5-9B
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 ```
 
-Run a reduced engineering pilot:
+Generate and audit the model-free recovery gate before any GPU training:
 
 ```bash
-python scripts/run_three_rounds.py \
-  --backbone qwen3.5-4b \
-  --artifact-scope pilot \
-  --dca-feedback-candidates 256 \
-  --vda-candidates 1024 \
-  --vda-train-size 256 \
-  --vda-dev-size 64 \
-  --vda-xplay-size 64
+python scripts/generate_recovery_canonical.py \
+  --scenario-count 200 \
+  --output /path/to/recovery_stage0.json
+
+python scripts/run_recovery_stage0.py \
+  --scenarios /path/to/recovery_stage0.json \
+  --output /path/to/stage0_audit.json \
+  --workers 4
 ```
 
-Run the formal three-round defaults:
+Only after Stage 0 passes, build the public-only Bootstrap SFT records:
 
 ```bash
-python scripts/run_three_rounds.py \
-  --backbone qwen3.5-4b \
-  --allocated-gpus 0,1,2,3
+python scripts/generate_recovery_canonical.py \
+  --scenario-count 400 \
+  --group-offset 1000 \
+  --output /path/to/recovery_gate_a_train.json
+
+python scripts/build_recovery_bootstrap.py \
+  --scenarios /path/to/recovery_gate_a_train.json \
+  --output-dir /path/to/recovery_bootstrap
 ```
 
-Run the 9B chain in a separate four-GPU process. Do not run two backbone chains
-on the same four devices.
+The historical `run_three_rounds.py` and `run_dca_first_round.py` launchers are
+retained to reproduce the failure analysis. They are not formal recovery
+entrypoints and must not be used to create a new lineage.
 
 After round 3, generate a sealed DCA_3 heldout split and audit lineage:
 
@@ -123,9 +140,9 @@ python scripts/audit_dca_first_lineage.py \
   --max-round 3
 ```
 
-See [`docs/DCA_FIRST_COEVOLUTION.md`](docs/DCA_FIRST_COEVOLUTION.md) for the
-data contract and [`docs/SELECT_V5C.md`](docs/SELECT_V5C.md) for the
-frozen-parameter selector.
+See [`docs/ACTION_SUPPORT_RECOVERY.md`](docs/ACTION_SUPPORT_RECOVERY.md) for the
+active data contract. The former DCA-first protocol and V5-C documents are
+retained as historical method and runtime-governance references.
 
 ## Evaluation
 

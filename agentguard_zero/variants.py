@@ -26,6 +26,40 @@ class ExperimentVariant:
 
 _VARIANTS = {
     "full": ExperimentVariant("full"),
+    # Progressive VDA-only controls. They replay sealed curricula and never
+    # update or invoke a DCA.
+    "static_train": ExperimentVariant(
+        "static_train",
+        train_dca=False,
+        frontier_filtering=False,
+        active_probing=False,
+        passive_verification=False,
+        trust_recalibration=False,
+        state_layer=False,
+    ),
+    "verification_tools": ExperimentVariant(
+        "verification_tools",
+        train_dca=False,
+        frontier_filtering=False,
+        active_probing=False,
+        passive_verification=True,
+        trust_recalibration=False,
+        state_layer=False,
+    ),
+    "active_probing": ExperimentVariant(
+        "active_probing",
+        train_dca=False,
+        frontier_filtering=False,
+        active_probing=True,
+        passive_verification=True,
+        trust_recalibration=False,
+        state_layer=False,
+    ),
+    "state_aware": ExperimentVariant(
+        "state_aware",
+        train_dca=False,
+        frontier_filtering=False,
+    ),
     "no_dca_training": ExperimentVariant("no_dca_training", train_dca=False),
     "no_frontier_filtering": ExperimentVariant(
         "no_frontier_filtering", frontier_filtering=False
@@ -51,6 +85,12 @@ _VARIANTS = {
 
 TRAINING_VARIANTS = tuple(name for name in _VARIANTS if name != "no_state_layer")
 ALL_VARIANTS = tuple(_VARIANTS)
+PROGRESSIVE_VARIANTS = (
+    "static_train",
+    "verification_tools",
+    "active_probing",
+    "state_aware",
+)
 
 
 def experiment_variant(name: str) -> ExperimentVariant:
@@ -59,4 +99,3 @@ def experiment_variant(name: str) -> ExperimentVariant:
         return _VARIANTS[normalized]
     except KeyError as exc:
         raise ValueError(f"unsupported experiment variant: {normalized}") from exc
-

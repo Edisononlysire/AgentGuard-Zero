@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from typing import Any, Dict, Iterable, List
@@ -42,8 +43,29 @@ VDA_SYSTEM_PROMPT_V4_APPEND_ONLY = VDA_SYSTEM_PROMPT_V4.replace(
 def vda_system_prompt_v4(variant_name: str) -> str:
     variant = experiment_variant(variant_name)
     if not variant.memory_lifecycle:
-        return VDA_SYSTEM_PROMPT_V4_APPEND_ONLY
-    prompt = VDA_SYSTEM_PROMPT_V4
+        prompt = VDA_SYSTEM_PROMPT_V4_APPEND_ONLY
+    else:
+        prompt = VDA_SYSTEM_PROMPT_V4
+    if not variant.state_layer:
+        prompt = prompt.replace(
+            "Use only the public observation and Defender State Layer; never infer hidden truth.",
+            "Use only the public observation; persistent Defender State Layer is unavailable. Never infer hidden truth.",
+        ).replace(
+            'trust_operation object: {"op":"hold|support|challenge|contradict|recover","source_id":string,"event_id":string,"evidence_refs":[string]}',
+            "trust_operation must be null; persistent trust state is unavailable.",
+        ).replace(
+            'memory_operation object: {"op":"ingest|promote|demote|reject|reopen","memory_id":string,"event_id":string,"claim":{"entity_id":string,"predicate":string,"object":string,"scope":string},"source_ids":[string],"evidence_refs":[string],"target_status":"quarantined|confirmed"}',
+            "memory_operation must be null; persistent profile memory is unavailable.",
+        ).replace(
+            'memory_use object: {"memory_id":string,"usage":"support|contradict|background","used_for":"belief|tool|response"}',
+            "memory_use must be null; persistent memory retrieval is unavailable.",
+        ).replace(
+            "New claims enter quarantine. Propose trust operations, never numeric trust scores.",
+            "Do not propose persistent trust or memory operations.",
+        ).replace(
+            "The current response is authorized against the state visible at the start of this turn. Trust and memory operations in this JSON commit for the next turn and cannot authorize the current response.",
+            "The current response is authorized only against public evidence visible at the start of this turn.",
+        )
     if not variant.active_probing:
         prompt = prompt.replace(
             "|SourceChallenge|CanaryProbe|DecoyProbe|ShadowActionProbe", ""
@@ -66,9 +88,14 @@ def vda_system_prompt_v4(variant_name: str) -> str:
             'CrossCheck args must be {"event_id":string,"evidence_ids":[string]}; evidence_ids must already be available, claim-compatible public evidence. Never provide source names as evidence.\n',
             "",
         )
+        passive_fallback = (
+            "Passive verification is unavailable; use active probes before state changes or high-impact response."
+            if variant.active_probing
+            else "Passive verification is unavailable; use only current public evidence and reversible response under uncertainty."
+        )
         prompt = prompt.replace(
             "Use independent public evidence before promote, reject, recover, or high-impact response.",
-            "Passive verification is unavailable; use active probes before state changes or high-impact response.",
+            passive_fallback,
         )
     if not variant.trust_recalibration:
         prompt = prompt.replace(
@@ -119,8 +146,18 @@ def scenario_horizon(scenario: Dict[str, Any]) -> int:
     return max(configured, latest_event_time + 2)
 
 
-def initial_observation(scenario: Dict[str, Any]) -> Dict[str, Any]:
-    env = instantiate_scenario(scenario)
+def initial_observation(
+    scenario: Dict[str, Any],
+    *,
+    experiment_variant: str | None = None,
+) -> Dict[str, Any]:
+    runtime_scenario = copy.deepcopy(scenario)
+    metadata = dict(runtime_scenario.get("metadata", {}) or {})
+    metadata["experiment_variant"] = str(
+        experiment_variant or metadata.get("experiment_variant", "full")
+    )
+    runtime_scenario["metadata"] = metadata
+    env = instantiate_scenario(runtime_scenario)
     return env.observe()
 
 
@@ -132,8 +169,21 @@ def public_instance_id(scenario: Dict[str, Any]) -> str:
     return f"tmcd-{digest[:16]}"
 
 
-def build_vda_prompt(scenario: Dict[str, Any], observation: Dict[str, Any] | None = None) -> str:
-    obs = observation if observation is not None else initial_observation(scenario)
+def build_vda_prompt(
+    scenario: Dict[str, Any],
+    observation: Dict[str, Any] | None = None,
+    *,
+    experiment_variant: str | None = None,
+) -> str:
+    variant = str(
+        experiment_variant
+        or scenario.get("metadata", {}).get("experiment_variant", "full")
+    )
+    obs = (
+        observation
+        if observation is not None
+        else initial_observation(scenario, experiment_variant=variant)
+    )
     is_v2 = scenario.get("protocol_version") == "tmcd-v2"
     public_context = project_public({
         "instance_id": public_instance_id(scenario),
@@ -142,16 +192,28 @@ def build_vda_prompt(scenario: Dict[str, Any], observation: Dict[str, Any] | Non
         "observation": obs,
     })
     assert_public(public_context)
-    variant = str(scenario.get("metadata", {}).get("experiment_variant", "full"))
     system_prompt = vda_system_prompt_v4(variant) if is_v2 else VDA_SYSTEM_PROMPT
     return system_prompt + "\nCurrent decision instance:" + json.dumps(
         public_context, ensure_ascii=False, separators=(",", ":")
     )
 
 
-def scenario_to_training_row(scenario: Dict[str, Any], split: str = "train") -> Dict[str, Any]:
-    obs = initial_observation(scenario)
-    prompt = build_vda_prompt(scenario, obs)
+def scenario_to_training_row(
+    scenario: Dict[str, Any],
+    split: str = "train",
+    *,
+    experiment_variant: str | None = None,
+) -> Dict[str, Any]:
+    variant = str(
+        experiment_variant
+        or scenario.get("metadata", {}).get("experiment_variant", "full")
+    )
+    obs = initial_observation(scenario, experiment_variant=variant)
+    prompt = build_vda_prompt(
+        scenario,
+        obs,
+        experiment_variant=variant,
+    )
     scenario_id = scenario.get("scenario_id", "unknown")
     scenario_json = json.dumps(scenario, ensure_ascii=False)
     task_id = scenario_task_id(scenario)

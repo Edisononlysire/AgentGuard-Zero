@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 from typing import Any
 
 from agentguard_zero.defender_state.evidence_store import EvidenceStore
@@ -37,6 +38,13 @@ from agentguard_zero.world.oracle_ledger import OracleLedger
 
 
 MITIGATING_ACTIONS = {"LimitSession", "ShadowBlock", "DeployDecoy", "Isolate"}
+ACTIVE_PROBE_RESPONSE_ACTIONS = {
+    "SourceChallenge",
+    "CanaryProbe",
+    "DecoyProbe",
+    "ShadowActionProbe",
+}
+PASSIVE_VERIFICATION_RESPONSE_ACTIONS = {"CrossCheck", "QueryProvenance"}
 
 
 class CyberDefenseEnvV2:
@@ -75,7 +83,8 @@ class CyberDefenseEnvV2:
         self.evidence_store = EvidenceStore()
         self.trust_manager = ContextualTrustManager()
         self.experiment_variant = str(
-            scenario.get("metadata", {}).get("experiment_variant", "full")
+            os.environ.get("AGZ_EXPERIMENT_VARIANT", "").strip()
+            or scenario.get("metadata", {}).get("experiment_variant", "full")
         )
         self.variant = experiment_variant(self.experiment_variant)
         self.state_layer_enabled = self.variant.state_layer
@@ -256,12 +265,20 @@ class CyberDefenseEnvV2:
         self.trust_manager.advance_time(self.t)
         events = self._register_current_events()
         retrieval = retrieve_memory(self.memory, events, time=self.t)
-        self._last_retrieved_ids = set(retrieval.get("retrieved_memory_ids", []))
+        self._last_retrieved_ids = (
+            set(retrieval.get("retrieved_memory_ids", []))
+            if self.state_layer_enabled
+            else set()
+        )
         constraints = self.scenario.get("defense_constraints", {})
         observation = make_observation_v4(
             time=self.t,
             observed_events=events,
-            evidence_snapshot=self.evidence_store.public_snapshot(time=self.t),
+            evidence_snapshot=(
+                self.evidence_store.public_snapshot(time=self.t)
+                if self.state_layer_enabled
+                else events
+            ),
             trust_snapshot=(self.trust_manager.public_snapshot() if self.state_layer_enabled else {}),
             memory_retrieval=(retrieval if self.state_layer_enabled else {}),
             public_assets=self._public_assets(),
@@ -272,7 +289,7 @@ class CyberDefenseEnvV2:
                 int(constraints.get("max_high_impact_actions", 1)) - self.high_impact_count,
             ),
             last_tool_result=self.last_tool_result,
-            public_probe_state=self.public_probe_state,
+            public_probe_state=(self.public_probe_state if self.state_layer_enabled else []),
         )
         assert_public(observation)
         self._observation_cache[self.t] = copy.deepcopy(observation)
@@ -513,6 +530,19 @@ class CyberDefenseEnvV2:
         )
         action_authorized = authorization.allowed
         authorization_reason = authorization.reason
+        proposed_action = str(proposed_response.get("action", "Observe"))
+        if (
+            proposed_action in ACTIVE_PROBE_RESPONSE_ACTIONS
+            and not self.variant.active_probing
+        ):
+            action_authorized = False
+            authorization_reason = "active_probing_disabled_by_ablation"
+        elif (
+            proposed_action in PASSIVE_VERIFICATION_RESPONSE_ACTIONS
+            and not self.variant.passive_verification
+        ):
+            action_authorized = False
+            authorization_reason = "passive_verification_disabled_by_ablation"
         executed_response = (
             proposed_response
             if action_authorized

@@ -210,6 +210,14 @@ class Level1RolloutStore:
             return existing
 
         scenario = _scenario_from_extra(extra)
+        runtime_variant = str(
+            extra.get("experiment_variant")
+            or (scenario.get("metadata", {}) or {}).get("experiment_variant", "full")
+        )
+        scenario = copy.deepcopy(scenario)
+        metadata = dict(scenario.get("metadata", {}) or {})
+        metadata["experiment_variant"] = runtime_variant
+        scenario["metadata"] = metadata
         max_steps = extra.get("max_env_steps")
         try:
             max_steps_int = int(max_steps) if max_steps is not None else None
