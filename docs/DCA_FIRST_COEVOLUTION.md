@@ -36,10 +36,14 @@ Its stages are resumable and recorded in `round_state.json`:
 3. Optimize the DCA LoRA adapter with online hard-but-solvable rewards.
 4. Reload the new DCA adapter and generate a fresh four-shard candidate pool.
 5. Apply format, validity, safety, solvability, uniqueness, and security-CFC checks.
-6. Select a task-balanced top curriculum, then distribute difficulty strata
+6. Audit the exact T1-T4 quotas required by train/dev/xplay. For any deficient
+   task, use the same frozen DCA checkpoint and a recorded new seed to generate
+   task-targeted top-ups, repeat the same hard filters, and fail closed after a
+   fixed retry budget. No VDA performance is used for this quota completion.
+7. Select a task-balanced top curriculum, then distribute difficulty strata
    across disjoint VDA train/dev/xplay splits and save their hashes.
-7. Optimize the VDA LoRA adapter with trajectory-level safety rewards.
-8. Independently reload both adapters and verify their hashes differ.
+8. Optimize the VDA LoRA adapter with trajectory-level safety rewards.
+9. Independently reload both adapters and verify their hashes differ.
 
 The formal defaults per backbone and round are:
 
@@ -60,6 +64,13 @@ a deterministic security-aware hard-but-solvable selector over generated
 scenario metadata and simulator checks. It is not a direct multi-rollout
 estimate of current-VDA failure probability, and the paper should use the same
 terminology.
+
+The configured fresh-pool count is the immutable initial pool size. If hard
+filtering leaves a task below its required split quota, the quota-completion
+stage appends only that task. The candidate audit records the initial and final
+counts, every top-up seed and hash, rejection statistics, and the unchanged DCA
+checkpoint hash. Candidate top-ups never relax a hard check and never retrain
+the DCA.
 
 ## Three Rounds
 

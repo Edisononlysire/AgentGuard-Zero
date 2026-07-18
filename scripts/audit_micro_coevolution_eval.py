@@ -122,7 +122,9 @@ def main() -> int:
 
     if pool.get("selection_policy") != "pilot_balanced_50_40_10":
         failures.append("selection_policy")
-    if int(pool.get("candidate_count", -1)) != args.expected_candidates:
+    if int(pool.get("initial_candidate_count", -1)) != args.expected_candidates:
+        failures.append("initial_candidate_pool_size")
+    if int(pool.get("candidate_count", -1)) < args.expected_candidates:
         failures.append("candidate_pool_size")
     if int((pool.get("split_counts", {}) or {}).get("train", -1)) != args.expected_train_size:
         failures.append("train_size")
@@ -186,7 +188,8 @@ def main() -> int:
         "failures": failures,
         "thresholds": {
             "scenario_count": args.expected_scenarios,
-            "candidate_pool_size": args.expected_candidates,
+            "initial_candidate_pool_size": args.expected_candidates,
+            "candidate_pool_size_min": args.expected_candidates,
             "train_size": args.expected_train_size,
             "train_difficulty_counts": expected_difficulty_counts,
             "candidate_count": 1,

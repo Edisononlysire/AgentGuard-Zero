@@ -126,6 +126,9 @@ common_round_args=(
   --vda-learning-rate 1e-6
   --vda-kl-coef 0.02
   --candidate-batch-size 72
+  --candidate-quota-min-topup-size 250
+  --candidate-quota-max-topup-rounds 3
+  --candidate-quota-safety-factor 1.25
 )
 
 manifest_adapter() {

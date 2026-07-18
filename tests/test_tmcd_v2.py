@@ -70,6 +70,10 @@ from scripts.build_vda_round_pool import (
     _split_task_quotas,
     _task_id,
 )
+from scripts.complete_vda_candidate_pool import (
+    merge_candidate_pools,
+    planned_topup_count,
+)
 from scripts.build_vda_partial_gate_dataset import collect_balanced_records
 from scripts.eval_tmcd_systems import (
     SYSTEMS,
@@ -1117,6 +1121,102 @@ class TMCDV2DatasetTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 merge_candidate_shards(paths, 2)
 
+    def test_candidate_quota_topup_plan_uses_observed_pass_rate(self) -> None:
+        self.assertEqual(
+            planned_topup_count(
+                deficit=47,
+                eligible=153,
+                attempted=250,
+                minimum=100,
+                safety_factor=1.2,
+            ),
+            100,
+        )
+        self.assertEqual(
+            planned_topup_count(
+                deficit=200,
+                eligible=300,
+                attempted=600,
+                minimum=100,
+                safety_factor=1.25,
+            ),
+            500,
+        )
+
+    def test_candidate_quota_merge_preserves_initial_and_topup_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            signature = {
+                "schema_version": 1,
+                "kind": "dca_candidate_pool",
+                "created_at": "2026-07-18T00:00:01Z",
+                "backbone": "qwen3.5-4b",
+                "experiment_variant": "full",
+                "generation_prompt_version": 6,
+                "candidate_normalization_version": 4,
+                "tmcd_release_revision": TMCD_RELEASE_REVISION,
+                "max_attempts": 3,
+                "source_dca_round": 1,
+                "source_dca_checkpoint_manifest_sha256": "a" * 64,
+            }
+            initial_path = root / "initial.json"
+            topup_path = root / "topup.json"
+            output_path = root / "complete.json"
+            initial = {
+                **signature,
+                "seed": 11,
+                "task_id": None,
+                "num_candidates_generated": 1,
+                "candidates": [
+                    {
+                        "candidate_index": 0,
+                        "scenario_fingerprint": "initial",
+                        "parse_ok": True,
+                        "checks": {"all_ok": True},
+                    }
+                ],
+            }
+            topup = {
+                **signature,
+                "seed": 22,
+                "task_id": "T1",
+                "num_candidates_generated": 2,
+                "candidates": [
+                    {
+                        "candidate_index": 0,
+                        "scenario_fingerprint": "topup",
+                        "parse_ok": True,
+                        "checks": {"all_ok": True},
+                    },
+                    {
+                        "candidate_index": 1,
+                        "scenario_fingerprint": "initial",
+                        "parse_ok": True,
+                        "checks": {"all_ok": True},
+                    },
+                ],
+            }
+            initial_path.write_text(json.dumps(initial), encoding="utf-8")
+            topup_path.write_text(json.dumps(topup), encoding="utf-8")
+            merged = merge_candidate_pools(
+                initial_path=initial_path,
+                topup_entries=[
+                    {
+                        "task_id": "T1",
+                        "seed": 22,
+                        "path": str(topup_path),
+                        "topup_round": 1,
+                    }
+                ],
+                output_path=output_path,
+            )
+            self.assertEqual(merged["initial_candidate_count"], 1)
+            self.assertEqual(merged["quota_topup_count"], 2)
+            self.assertEqual(merged["num_candidates_generated"], 3)
+            self.assertEqual(merged["num_duplicates"], 1)
+            self.assertEqual(len(merged["candidate_sources"]), 2)
+            self.assertEqual(merged["candidates"][1]["candidate_pool_source_kind"], "quota_topup")
+
     def test_t2_pair_prefixes_match(self) -> None:
         first, second = paired_minimal_examples_v2()
         self.assertEqual(validate_pair_v2(first, second), (True, "ok"))
@@ -1390,6 +1490,8 @@ class TMCDV2ReleaseTests(unittest.TestCase):
         self.assertIn("--vda-batch-size 50", full)
         self.assertIn("--vda-steps 10", full)
         self.assertIn("--candidate-batch-size 72", full)
+        self.assertIn("--candidate-quota-min-topup-size 250", full)
+        self.assertIn("--candidate-quota-max-topup-rounds 3", full)
         self.assertIn("export AGZ_AGENT_NUM_WORKERS=4", full)
         self.assertIn("--candidate-count 1", full)
         self.assertIn("--expected-scenarios 200", full)
@@ -1431,6 +1533,9 @@ class TMCDV2ReleaseTests(unittest.TestCase):
         self.assertIn("--vda-steps 75", source)
         self.assertIn("export AGZ_VDA_GENERATION_BATCH_SIZE=96", source)
         self.assertIn("--candidate-batch-size 72", source)
+        self.assertIn("--candidate-quota-min-topup-size 250", source)
+        self.assertIn("--candidate-quota-max-topup-rounds 3", source)
+        self.assertIn("--candidate-quota-safety-factor 1.25", source)
         self.assertIn("--limit 800", source)
         self.assertIn("--expected-scenarios 800", source)
         self.assertIn("--expected-candidates 4800", source)
@@ -1454,6 +1559,7 @@ class TMCDV2ReleaseTests(unittest.TestCase):
         self.assertIn('"--expected-candidates"', audit)
         self.assertIn('"--expected-train-size"', audit)
         self.assertIn("args.expected_train_size * 5 // 10", audit)
+        self.assertIn('pool.get("initial_candidate_count"', audit)
 
     def test_round_runner_invalidates_downstream_pool_and_can_stop_before_vda(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -1472,6 +1578,8 @@ class TMCDV2ReleaseTests(unittest.TestCase):
             "candidate generation signature changed after VDA recovery checkpoints",
             source,
         )
+        self.assertIn('stage = "ensure_vda_candidate_task_quotas"', source)
+        self.assertIn('"complete_vda_candidate_pool.py"', source)
         dca_env = source.index('"AGZ_REQUIRE_TRAJECTORY_REWARD": "0"')
         dca_launch = source.index('train_dca_qwen35_lora.sh')
         vda_env = source.index('"AGZ_REQUIRE_TRAJECTORY_REWARD": "1"')

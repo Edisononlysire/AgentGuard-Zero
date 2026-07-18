@@ -482,35 +482,14 @@ def _training_row(
     return row
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate-pool", required=True)
-    parser.add_argument("--feedback-log", required=True)
-    parser.add_argument("--dca-checkpoint-manifest", required=True)
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--train-size", type=int, required=True)
-    parser.add_argument("--dev-size", type=int, required=True)
-    parser.add_argument("--xplay-size", type=int, required=True)
-    parser.add_argument("--seed", type=int, default=20260709)
-    parser.add_argument("--train-batch-size", type=int, default=0)
-    parser.add_argument(
-        "--selection-policy",
-        choices=("formal_top_pool_rank_stratified", "pilot_balanced_50_40_10"),
-        default="formal_top_pool_rank_stratified",
-    )
-    return parser.parse_args()
+def _load_and_filter_candidate_pool(
+    *,
+    candidate_path: Path,
+    feedback_path: Path,
+    dca_manifest_path: Path,
+) -> dict[str, Any]:
+    """Validate one generated pool and return the exact build-time eligible set."""
 
-
-def main() -> None:
-    args = parse_args()
-    requested = args.train_size + args.dev_size + args.xplay_size
-    if min(args.train_size, args.dev_size, args.xplay_size) < 0 or requested <= 0:
-        raise SystemExit("split sizes must be non-negative and total size must be positive")
-
-    candidate_path = Path(args.candidate_pool).resolve()
-    feedback_path = Path(args.feedback_log).resolve()
-    dca_manifest_path = Path(args.dca_checkpoint_manifest).resolve()
-    output_dir = Path(args.output_dir).resolve()
     pool = read_json(candidate_path)
     raw_manifest = read_json(dca_manifest_path)
     target_round = int(raw_manifest.get("round", -1))
@@ -556,7 +535,6 @@ def main() -> None:
         raise LineageError("candidate pool predates DCA_{r+1} checkpoint")
 
     feedback = feedback_fingerprints(feedback_path)
-    candidate_pool_sha = sha256_file(candidate_path)
     valid: list[dict[str, Any]] = []
     seen: set[str] = set()
     excluded = Counter()
@@ -610,43 +588,160 @@ def main() -> None:
             "task_id": task_id,
             "cfc": cfc,
         }
-        if base_item["task_id"] == "T2" and scenario.get("protocol_version") == "tmcd-v2":
+        if task_id == "T2" and scenario.get("protocol_version") == "tmcd-v2":
             counterpart = paired_counterpart_v2(scenario)
             pair_ok, pair_reason = validate_pair_v2(scenario, counterpart)
             counterpart_checks = full_check(counterpart)
             counterpart_cfc = _safe_cfc_metrics(counterpart)
-            if not pair_ok or not counterpart_checks.get("all_ok", False) or counterpart_cfc is None:
+            if (
+                not pair_ok
+                or not counterpart_checks.get("all_ok", False)
+                or counterpart_cfc is None
+            ):
                 excluded[f"invalid_t2_counterpart:{pair_reason}"] += 1
                 continue
-            else:
-                counterpart_metadata = dict(counterpart.get("metadata", {}) or {})
-                counterpart_metadata.update(
-                    {
-                        "source_dca_round": target_round,
-                        "source_checkpoint_manifest_sha256": dca_manifest_sha,
-                        "derived_from_scenario_id": scenario.get("scenario_id"),
-                    }
-                )
-                counterpart["metadata"] = counterpart_metadata
-                counterpart_fingerprint = scenario_fingerprint(counterpart)
-                if counterpart_fingerprint in feedback or counterpart_fingerprint in seen:
-                    excluded["t2_counterpart_overlap"] += 1
-                    continue
-                seen.add(counterpart_fingerprint)
-                valid.append(base_item)
-                valid.append(
-                    {
-                        **record,
-                        "scenario": counterpart,
-                        "scenario_fingerprint": counterpart_fingerprint,
-                        "duplicate": False,
-                        "task_id": "T2",
-                        "cfc": counterpart_cfc,
-                        "derived_counterpart": True,
-                    }
-                )
+            counterpart_metadata = dict(counterpart.get("metadata", {}) or {})
+            counterpart_metadata.update(
+                {
+                    "source_dca_round": target_round,
+                    "source_checkpoint_manifest_sha256": dca_manifest_sha,
+                    "derived_from_scenario_id": scenario.get("scenario_id"),
+                }
+            )
+            counterpart["metadata"] = counterpart_metadata
+            counterpart_fingerprint = scenario_fingerprint(counterpart)
+            if counterpart_fingerprint in feedback or counterpart_fingerprint in seen:
+                excluded["t2_counterpart_overlap"] += 1
+                continue
+            seen.add(counterpart_fingerprint)
+            valid.append(base_item)
+            valid.append(
+                {
+                    **record,
+                    "scenario": counterpart,
+                    "scenario_fingerprint": counterpart_fingerprint,
+                    "duplicate": False,
+                    "task_id": "T2",
+                    "cfc": counterpart_cfc,
+                    "derived_counterpart": True,
+                }
+            )
         else:
             valid.append(base_item)
+
+    attempted_task_counts = Counter(
+        task_id_from_focus(str(record.get("task_focus", "")))
+        for record in pool.get("candidates", []) or []
+    )
+    attempted_task_counts.pop("unknown", None)
+    return {
+        "pool": pool,
+        "backbone": backbone,
+        "target_round": target_round,
+        "dca_manifest": dca_manifest,
+        "dca_manifest_sha": dca_manifest_sha,
+        "variant_name": variant_name,
+        "variant": variant,
+        "feedback": feedback,
+        "candidate_pool_sha": sha256_file(candidate_path),
+        "valid": valid,
+        "excluded": excluded,
+        "attempted_task_counts": attempted_task_counts,
+    }
+
+
+def audit_candidate_task_quotas(
+    *,
+    candidate_path: Path,
+    feedback_path: Path,
+    dca_manifest_path: Path,
+    split_counts: dict[str, int],
+) -> dict[str, Any]:
+    """Return the same hard-filtered task quota audit used by the VDA builder."""
+
+    context = _load_and_filter_candidate_pool(
+        candidate_path=candidate_path,
+        feedback_path=feedback_path,
+        dca_manifest_path=dca_manifest_path,
+    )
+    quotas = _split_task_quotas(split_counts)
+    required = {
+        task_id: sum(quota[task_id] for quota in quotas.values())
+        for task_id in TASK_IDS
+    }
+    eligible = Counter(item["task_id"] for item in context["valid"])
+    shortages = {
+        task_id: {
+            "eligible": int(eligible.get(task_id, 0)),
+            "required": int(count),
+            "deficit": int(count - eligible.get(task_id, 0)),
+        }
+        for task_id, count in required.items()
+        if eligible.get(task_id, 0) < count
+    }
+    return {
+        "candidate_count": len(context["pool"].get("candidates", []) or []),
+        "eligible_count": len(context["valid"]),
+        "eligible_task_counts": {
+            task_id: int(eligible.get(task_id, 0)) for task_id in TASK_IDS
+        },
+        "attempted_task_counts": {
+            task_id: int(context["attempted_task_counts"].get(task_id, 0))
+            for task_id in TASK_IDS
+        },
+        "required_task_counts": required,
+        "shortages": shortages,
+        "excluded_counts": dict(context["excluded"]),
+        "candidate_pool_sha256": context["candidate_pool_sha"],
+        "source_dca_checkpoint_manifest_sha256": context["dca_manifest_sha"],
+    }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate-pool", required=True)
+    parser.add_argument("--feedback-log", required=True)
+    parser.add_argument("--dca-checkpoint-manifest", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--train-size", type=int, required=True)
+    parser.add_argument("--dev-size", type=int, required=True)
+    parser.add_argument("--xplay-size", type=int, required=True)
+    parser.add_argument("--seed", type=int, default=20260709)
+    parser.add_argument("--train-batch-size", type=int, default=0)
+    parser.add_argument(
+        "--selection-policy",
+        choices=("formal_top_pool_rank_stratified", "pilot_balanced_50_40_10"),
+        default="formal_top_pool_rank_stratified",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    requested = args.train_size + args.dev_size + args.xplay_size
+    if min(args.train_size, args.dev_size, args.xplay_size) < 0 or requested <= 0:
+        raise SystemExit("split sizes must be non-negative and total size must be positive")
+
+    candidate_path = Path(args.candidate_pool).resolve()
+    feedback_path = Path(args.feedback_log).resolve()
+    dca_manifest_path = Path(args.dca_checkpoint_manifest).resolve()
+    output_dir = Path(args.output_dir).resolve()
+    context = _load_and_filter_candidate_pool(
+        candidate_path=candidate_path,
+        feedback_path=feedback_path,
+        dca_manifest_path=dca_manifest_path,
+    )
+    pool = context["pool"]
+    target_round = context["target_round"]
+    backbone = context["backbone"]
+    dca_manifest = context["dca_manifest"]
+    dca_manifest_sha = context["dca_manifest_sha"]
+    variant_name = context["variant_name"]
+    variant = context["variant"]
+    feedback = context["feedback"]
+    candidate_pool_sha = context["candidate_pool_sha"]
+    valid = context["valid"]
+    excluded = context["excluded"]
 
     if len(valid) < requested:
         raise LineageError(
@@ -761,6 +856,11 @@ def main() -> None:
         "feedback_fingerprint_count": len(feedback),
         "feedback_vda_overlap_count": 0,
         "candidate_count": len(pool.get("candidates", []) or []),
+        "initial_candidate_count": int(
+            pool.get("initial_candidate_count", len(pool.get("candidates", []) or []))
+        ),
+        "candidate_quota_topup_count": int(pool.get("quota_topup_count", 0)),
+        "candidate_sources": pool.get("candidate_sources", []),
         "candidate_generation_prompt_version": pool.get("generation_prompt_version"),
         "candidate_normalization_version": pool.get("candidate_normalization_version"),
         "tmcd_release_revision": TMCD_RELEASE_REVISION,

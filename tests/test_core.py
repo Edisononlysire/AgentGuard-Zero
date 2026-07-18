@@ -164,7 +164,14 @@ class ReleaseIntegrityTests(unittest.TestCase):
     def test_orchestrator_orders_dca_update_before_fresh_pool_and_vda(self) -> None:
         source = (SCRIPTS / "run_dca_first_round.py").read_text(encoding="utf-8")
         self.assertLess(source.index('stage = "update_dca"'), source.index('stage = "generate_fresh_vda_candidates"'))
-        self.assertLess(source.index('stage = "generate_fresh_vda_candidates"'), source.index('stage = "update_vda"'))
+        self.assertLess(
+            source.index('stage = "generate_fresh_vda_candidates"'),
+            source.index('stage = "ensure_vda_candidate_task_quotas"'),
+        )
+        self.assertLess(
+            source.index('stage = "ensure_vda_candidate_task_quotas"'),
+            source.index('stage = "update_vda"'),
+        )
         self.assertIn("train_vda_qwen35_lora.sh", source)
 
     def test_training_environment_is_repository_relative(self) -> None:

@@ -318,6 +318,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vda-learning-rate", type=float, default=2e-5)
     parser.add_argument("--vda-kl-coef", type=float, default=0.0)
     parser.add_argument("--candidate-batch-size", type=int, default=4)
+    parser.add_argument("--candidate-quota-min-topup-size", type=int, default=250)
+    parser.add_argument("--candidate-quota-max-topup-rounds", type=int, default=3)
+    parser.add_argument("--candidate-quota-safety-factor", type=float, default=1.25)
     parser.add_argument("--feedback-port", type=int, default=0)
     parser.add_argument(
         "--stop-after-stage",
@@ -376,6 +379,12 @@ def main() -> None:
         raise SystemExit("VDA learning rate must be positive")
     if args.vda_kl_coef < 0:
         raise SystemExit("VDA KL coefficient cannot be negative")
+    if args.candidate_quota_min_topup_size <= 0:
+        raise SystemExit("candidate quota minimum top-up size must be positive")
+    if args.candidate_quota_max_topup_rounds < 0:
+        raise SystemExit("candidate quota maximum top-up rounds cannot be negative")
+    if args.candidate_quota_safety_factor < 1.0:
+        raise SystemExit("candidate quota safety factor must be at least one")
 
     root = Path(args.root).resolve()
     model_path = args.model_path or os.environ.get(BACKBONE_ENV[args.backbone], "")
@@ -406,6 +415,8 @@ def main() -> None:
     feedback_log_path = feedback_dir / "feedback.jsonl"
     feedback_manifest_path = feedback_dir / "manifest.json"
     candidate_path = layout.data_dir / "vda_candidates" / "candidates.json"
+    quota_candidate_path = layout.data_dir / "vda_candidates" / "candidates.quota_complete.json"
+    quota_audit_path = layout.data_dir / "vda_candidates" / "candidate_quota_audit.json"
     candidate_shards = [
         candidate_path.with_name(f"candidates.shard_{index}.json")
         for index in range(len(gpu_ids))
@@ -946,6 +957,144 @@ def main() -> None:
         _mark_failed(state_path, stage, exc)
         raise
 
+    stage = "ensure_vda_candidate_task_quotas"
+    split_count_signature = {
+        "train": args.vda_train_size,
+        "dev": args.vda_dev_size,
+        "xplay": args.vda_xplay_size,
+    }
+    topup_config_signature = {
+        "seed": args.seed + target_round * 1000,
+        "min_topup_size": args.candidate_quota_min_topup_size,
+        "max_topup_rounds": args.candidate_quota_max_topup_rounds,
+        "safety_factor": args.candidate_quota_safety_factor,
+    }
+    try:
+        if stage_complete(state_path, stage):
+            existing_audit = (
+                json.loads(quota_audit_path.read_text(encoding="utf-8"))
+                if quota_audit_path.exists()
+                else {}
+            )
+            quota_signature_matches = (
+                existing_audit.get("status") == "complete"
+                and existing_audit.get("initial_candidate_pool_sha256")
+                == sha256_file(candidate_path)
+                and existing_audit.get("source_dca_checkpoint_manifest_sha256")
+                == sha256_file(dca_target_manifest_path)
+                and existing_audit.get("split_counts") == split_count_signature
+                and existing_audit.get("topup_config") == topup_config_signature
+                and existing_audit.get("final_shortages") == {}
+                and quota_candidate_path.is_file()
+                and existing_audit.get("final_candidate_pool_sha256")
+                == sha256_file(quota_candidate_path)
+            )
+            if not quota_signature_matches:
+                if stage_complete(state_path, "update_vda"):
+                    raise LineageError(
+                        "candidate quota completion signature changed after VDA training; "
+                        "use a new artifact scope"
+                    )
+                existing_vda_steps = list(
+                    (vda_target_dir / "trainer").glob("global_step_*")
+                )
+                if existing_vda_steps:
+                    raise LineageError(
+                        "candidate quota completion signature changed after VDA recovery "
+                        f"checkpoints were created: {existing_vda_steps}"
+                    )
+                mark_stage(
+                    state_path,
+                    stage,
+                    "stale",
+                    reason="candidate quota completion signature changed",
+                )
+                mark_stage(
+                    state_path,
+                    "build_isolated_vda_pool",
+                    "stale",
+                    reason="upstream candidate quota completion changed",
+                )
+        if not stage_complete(state_path, stage):
+            mark_stage(state_path, stage, "in_progress")
+            _run(
+                [
+                    sys.executable,
+                    str(root / "scripts" / "complete_vda_candidate_pool.py"),
+                    "--initial-candidate-pool",
+                    str(candidate_path),
+                    "--output",
+                    str(quota_candidate_path),
+                    "--audit-output",
+                    str(quota_audit_path),
+                    "--feedback-log",
+                    str(feedback_log_path),
+                    "--dca-checkpoint-manifest",
+                    str(dca_target_manifest_path),
+                    "--train-size",
+                    str(args.vda_train_size),
+                    "--dev-size",
+                    str(args.vda_dev_size),
+                    "--xplay-size",
+                    str(args.vda_xplay_size),
+                    "--allocated-gpus",
+                    args.allocated_gpus,
+                    "--seed",
+                    str(args.seed + target_round * 1000),
+                    "--batch-size",
+                    str(args.candidate_batch_size),
+                    "--min-topup-size",
+                    str(args.candidate_quota_min_topup_size),
+                    "--max-topup-rounds",
+                    str(args.candidate_quota_max_topup_rounds),
+                    "--safety-factor",
+                    str(args.candidate_quota_safety_factor),
+                    "--max-input-tokens",
+                    os.environ.get("AGZ_DCA_MAX_PROMPT_LENGTH", "2048"),
+                    "--max-new-tokens",
+                    os.environ.get("AGZ_DCA_MAX_RESPONSE_LENGTH", "1024"),
+                    "--attn-implementation",
+                    os.environ.get("AGZ_DCA_CANDIDATE_ATTN_IMPLEMENTATION", "sdpa"),
+                    "--partial-fsync-every-batches",
+                    os.environ.get(
+                        "AGZ_DCA_CANDIDATE_PARTIAL_FSYNC_EVERY_BATCHES", "16"
+                    ),
+                    "--max-attempts",
+                    str(candidate_max_attempts),
+                    "--temperature",
+                    os.environ.get("AGZ_ROLLOUT_TEMPERATURE", "0.7"),
+                    "--top-p",
+                    os.environ.get("AGZ_ROLLOUT_TOP_P", "1.0"),
+                    "--top-k",
+                    os.environ.get("AGZ_ROLLOUT_TOP_K", "0"),
+                    "--experiment-variant",
+                    args.experiment_variant,
+                ]
+            )
+            quota_audit = json.loads(quota_audit_path.read_text(encoding="utf-8"))
+            if quota_audit.get("status") != "complete" or quota_audit.get(
+                "final_shortages"
+            ) != {}:
+                raise LineageError("candidate quota completion did not seal a full task pool")
+            if quota_audit.get("final_candidate_pool_sha256") != sha256_file(
+                quota_candidate_path
+            ):
+                raise LineageError("candidate quota-complete pool hash mismatch")
+            mark_stage(
+                state_path,
+                stage,
+                "completed",
+                candidate_pool=str(quota_candidate_path),
+                candidate_pool_sha256=sha256_file(quota_candidate_path),
+                quota_audit=str(quota_audit_path),
+                quota_audit_sha256=sha256_file(quota_audit_path),
+                topup_count=int(quota_audit.get("final_candidate_count", 0))
+                - int(quota_audit.get("initial_candidate_count", 0)),
+            )
+    except Exception as exc:
+        _mark_failed(state_path, stage, exc)
+        raise
+
     stage = "build_isolated_vda_pool"
     try:
         if stage_complete(state_path, stage):
@@ -977,7 +1126,7 @@ def main() -> None:
                     sys.executable,
                     str(root / "scripts" / "build_vda_round_pool.py"),
                     "--candidate-pool",
-                    str(candidate_path),
+                    str(quota_candidate_path),
                     "--feedback-log",
                     str(feedback_log_path),
                     "--dca-checkpoint-manifest",
