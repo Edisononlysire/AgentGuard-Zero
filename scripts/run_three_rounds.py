@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
             "pilot",
             "tmcd_v2",
             "tmcd_v2_pilot",
+            "tmcd_v2_pilot_fast",
+            "tmcd_v2_pilot_fast_gate",
             "tmcd_v24",
             "tmcd_v242",
         ],

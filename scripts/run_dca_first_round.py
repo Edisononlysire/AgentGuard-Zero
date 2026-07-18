@@ -284,6 +284,8 @@ def parse_args() -> argparse.Namespace:
             "pilot",
             "tmcd_v2",
             "tmcd_v2_pilot",
+            "tmcd_v2_pilot_fast",
+            "tmcd_v2_pilot_fast_gate",
             "tmcd_v24",
             "tmcd_v242",
         ],
@@ -318,9 +320,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feedback-port", type=int, default=0)
     parser.add_argument(
         "--stop-after-stage",
-        choices=["build_isolated_vda_pool"],
+        choices=["update_dca", "build_isolated_vda_pool"],
         default=None,
-        help="Stop after producing and validating the isolated VDA pool.",
+        help=(
+            "Stop after the requested completed stage. The update_dca option is "
+            "intended for an isolated one-step resource gate; the pool option "
+            "produces and validates the isolated VDA curriculum."
+        ),
     )
     return parser.parse_args()
 
@@ -775,6 +781,28 @@ def main() -> None:
     except Exception as exc:
         _mark_failed(state_path, stage, exc)
         raise
+
+    if args.stop_after_stage == stage:
+        print(
+            json.dumps(
+                {
+                    "status": "stopped_after_requested_stage",
+                    "stage": stage,
+                    "backbone": args.backbone,
+                    "source_round": args.source_round,
+                    "target_round": target_round,
+                    "dca_manifest": str(dca_target_manifest_path),
+                    "dca_manifest_sha256": sha256_file(dca_target_manifest_path),
+                    "feedback_manifest": str(feedback_manifest_path),
+                    "feedback_manifest_sha256": sha256_file(feedback_manifest_path),
+                    "feedback_rows": len(read_jsonl(feedback_log_path)),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
+        )
+        return
 
     stage = "generate_fresh_vda_candidates"
     candidate_max_attempts = int(

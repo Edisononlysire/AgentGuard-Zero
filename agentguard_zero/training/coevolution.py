@@ -523,6 +523,8 @@ class RoundLayout:
             "pilot",
             "tmcd_v2",
             "tmcd_v2_pilot",
+            "tmcd_v2_pilot_fast",
+            "tmcd_v2_pilot_fast_gate",
             "tmcd_v24",
             "tmcd_v242",
         }:
@@ -541,6 +543,8 @@ class RoundLayout:
             "pilot": "co_evolution_pilot",
             "tmcd_v2": "tmcd_v2",
             "tmcd_v2_pilot": "tmcd_v2_pilot",
+            "tmcd_v2_pilot_fast": "tmcd_v2_pilot_fast",
+            "tmcd_v2_pilot_fast_gate": "tmcd_v2_pilot_fast_gate",
             "tmcd_v24": "tmcd_v24",
             "tmcd_v242": "tmcd_v242",
         }[self.artifact_scope]
@@ -556,6 +560,8 @@ class RoundLayout:
         if self.artifact_scope in {
             "tmcd_v2",
             "tmcd_v2_pilot",
+            "tmcd_v2_pilot_fast",
+            "tmcd_v2_pilot_fast_gate",
             "tmcd_v24",
             "tmcd_v242",
         }:

@@ -44,6 +44,7 @@ from agentguard_zero.training.dca_dataset import (
 )
 from agentguard_zero.training.coevolution import (
     LineageError,
+    RoundLayout,
     load_checkpoint_manifest,
     scenario_fingerprint,
     sha256_source_tree,
@@ -1362,13 +1363,64 @@ class TMCDV2ReleaseTests(unittest.TestCase):
         self.assertIn("expected (2, 5)", source)
         self.assertIn("20260719_tmcd_micro_1k500_retry1", source)
 
+    def test_fast_micro_protocol_is_isolated_gated_and_one_pass(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        jobs = root / "scripts" / "jobs"
+        gate = (
+            jobs / "tmcd_v2_pilot_4b_micro_1k500_fast_gate_node175.dsub.sh"
+        ).read_text(encoding="utf-8")
+        full = (
+            jobs / "tmcd_v2_pilot_4b_micro_1k500_fast_node175.dsub.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("SCOPE=tmcd_v2_pilot_fast_gate", gate)
+        self.assertIn("--dca-feedback-candidates 100", gate)
+        self.assertIn("--dca-batch-size 50", gate)
+        self.assertIn("--dca-steps 1", gate)
+        self.assertIn("--stop-after-stage update_dca", gate)
+        self.assertIn("export AGZ_DCA_MAX_NUM_SEQS=25", gate)
+
+        self.assertIn("SCOPE=tmcd_v2_pilot_fast", full)
+        self.assertIn("FAST_RESOURCE_GATE_SUCCEEDED", full)
+        self.assertIn("--dca-feedback-candidates 1000", full)
+        self.assertIn("--dca-rollout-n 2", full)
+        self.assertIn("--dca-batch-size 50", full)
+        self.assertIn("--dca-steps 10", full)
+        self.assertIn("--vda-train-size 500", full)
+        self.assertIn("--vda-batch-size 50", full)
+        self.assertIn("--vda-steps 10", full)
+        self.assertIn("--candidate-batch-size 72", full)
+        self.assertIn("export AGZ_AGENT_NUM_WORKERS=4", full)
+        self.assertIn("--candidate-count 1", full)
+        self.assertIn("--expected-scenarios 200", full)
+
+        fast_layout = RoundLayout(
+            root=root,
+            backbone="qwen3.5-4b",
+            source_round=0,
+            artifact_scope="tmcd_v2_pilot_fast",
+        )
+        gate_layout = RoundLayout(
+            root=root,
+            backbone="qwen3.5-4b",
+            source_round=0,
+            artifact_scope="tmcd_v2_pilot_fast_gate",
+        )
+        self.assertIn("data/tmcd_v2_pilot_fast", str(fast_layout.data_dir))
+        self.assertIn(
+            "checkpoints/tmcd_v2_pilot_fast_gate",
+            str(gate_layout.checkpoint_dir("dca", 1)),
+        )
+
     def test_round_runner_invalidates_downstream_pool_and_can_stop_before_vda(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "scripts" / "run_dca_first_round.py").read_text(
             encoding="utf-8"
         )
         self.assertIn('"--stop-after-stage"', source)
+        self.assertIn('choices=["update_dca", "build_isolated_vda_pool"]', source)
         self.assertIn('args.stop_after_stage == stage', source)
+        self.assertIn('"feedback_rows": len(read_jsonl(feedback_log_path))', source)
         self.assertIn(
             '"build_isolated_vda_pool",\n                    "stale"',
             source,
