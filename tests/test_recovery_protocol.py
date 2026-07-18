@@ -4,6 +4,7 @@ import copy
 import json
 import pickle
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,6 +30,8 @@ from agentguard_zero.recovery.gates import (
     evaluate_stage0_gate,
 )
 from agentguard_zero.recovery.public_teacher import (
+    ACTION_HORIZONS,
+    SHORTLIST_QUOTAS,
     PublicStateRobustTeacher,
     TeacherDecision,
     compact_wire_json,
@@ -36,7 +39,11 @@ from agentguard_zero.recovery.public_teacher import (
     public_state_digest,
 )
 from agentguard_zero.recovery.protocol import RecoveryConfig
-from agentguard_zero.rewards.recovery_vda_reward import compute_recovery_reward
+from agentguard_zero.rewards.recovery_vda_reward import (
+    REQUIRED_RECOVERY_SIGNALS,
+    compute_recovery_reward,
+    validate_recovery_signal_batch,
+)
 from agentguard_zero.schemas.action_schema_v4 import (
     DEFAULT_ACTION_PACKET_V4,
     parse_action_json_v4,
@@ -44,6 +51,7 @@ from agentguard_zero.schemas.action_schema_v4 import (
 from agentguard_zero.schemas.scenario_schema_v2 import paired_minimal_examples_v2
 from agentguard_zero.training.vda_dataset import build_vda_prompt
 from agentguard_zero.world.public_projector import assert_public
+from scripts.build_recovery_bootstrap import load_accepted_stage0
 
 
 def _gate_a_metrics(**overrides):
@@ -68,6 +76,30 @@ def _gate_a_metrics(**overrides):
 
 
 class RecoveryProtocolTests(unittest.TestCase):
+    def test_bootstrap_parent_stage0_gate_is_fail_closed(self):
+        payload = {
+            "kind": "recovery_stage0_audit",
+            "protocol_version": RecoveryConfig().protocol_version,
+            "accepted": True,
+            "status": "accepted",
+            "next_stage": "bootstrap_data_build_and_audit",
+            "model_calls": 0,
+            "parameter_updates": 0,
+            "verdict": {
+                "gate": "stage0_fixed_policy",
+                "accepted": True,
+                "next_stage": "bootstrap_data_build_and_audit",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stage0.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertTrue(load_accepted_stage0(path)["accepted"])
+            payload["parameter_updates"] = 1
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "model-free"):
+                load_accepted_stage0(path)
+
     def test_frozen_recovery_config_matches_python_protocol(self):
         payload = json.loads(
             (ROOT / "configs/recovery/action_support_bootstrap_v1.json").read_text(
@@ -78,8 +110,29 @@ class RecoveryProtocolTests(unittest.TestCase):
         self.assertEqual(payload["protocol_version"], config.protocol_version)
         self.assertEqual(payload["zero_definition"], config.zero_definition)
         self.assertEqual(payload["lineage"], config.lineage_disposition)
+        self.assertEqual(
+            payload["bootstrap_sft"]["lora_target_modules"],
+            list(config.bootstrap_sft.lora_target_modules),
+        )
+        self.assertEqual(
+            payload["execution_scope"]["allowed_now"],
+            [
+                "stage0_fixed_policy_gate",
+                "public_teacher_behavior_audit",
+                "bootstrap_data_build_after_accepted_stage0",
+            ],
+        )
+        locked = set(payload["execution_scope"]["locked_until_teacher_review"])
+        self.assertTrue(
+            {
+                "gate_a_dual_arm_bootstrap_sft",
+                "single_dagger_correction",
+                "gate_b_10_step_rl",
+                "dca_vda_coevolution",
+            }.issubset(locked)
+        )
 
-    def test_bootstrap_replicates_public_label_without_branch_id_leak(self):
+    def test_bootstrap_emits_one_record_per_public_decision(self):
         class ObserveTeacher:
             def decide(self, worlds, **_kwargs):
                 observation = worlds[0].observe()
@@ -97,23 +150,18 @@ class RecoveryProtocolTests(unittest.TestCase):
                     world_count=len(worlds),
                     search_horizon=1,
                     q_audit={"observe": 0.0},
+                    core_q_audit={"observe": 0.0},
                 )
 
         group = list(paired_minimal_examples_v2())
         result = build_bootstrap_records(
             [group],
             teacher=ObserveTeacher(),
-            max_records=2,
+            max_records=1,
         )
-        self.assertEqual(len(result.train_records), 2)
-        self.assertNotEqual(
-            result.train_records[0]["record_id"],
-            result.train_records[1]["record_id"],
-        )
-        self.assertEqual(
-            result.train_records[0]["prompt"],
-            result.train_records[1]["prompt"],
-        )
+        self.assertEqual(len(result.train_records), 1)
+        self.assertEqual(len(result.audit_records), 1)
+        self.assertEqual(result.audit_records[0]["world_count"], 2)
         for scenario in group:
             self.assertNotIn(
                 str(scenario["scenario_id"]),
@@ -162,8 +210,8 @@ class RecoveryProtocolTests(unittest.TestCase):
             public_state_digest(envs[1].observe()),
         )
         before = [pickle.dumps(env, protocol=5) for env in envs]
-        teacher = PublicStateRobustTeacher(beam_width=3, max_candidates=40)
-        decision = teacher.decide(envs, horizon=1)
+        teacher = PublicStateRobustTeacher(beam_width=20, max_candidates=40)
+        decision = teacher.decide(envs, horizon=3)
         self.assertEqual(decision.world_count, 2)
         self.assertFalse(decision.hidden_state_in_target)
         assert_public(decision.selected_packet)
@@ -174,6 +222,20 @@ class RecoveryProtocolTests(unittest.TestCase):
             [pickle.dumps(env, protocol=5) for env in envs],
             before,
         )
+
+    def test_public_teacher_uses_common_horizon_and_diverse_shortlist_quota(self):
+        self.assertEqual(set(ACTION_HORIZONS.values()), {3})
+        self.assertGreaterEqual(sum(SHORTLIST_QUOTAS.values()), 16)
+        self.assertGreaterEqual(SHORTLIST_QUOTAS["active_probe"], 4)
+        self.assertEqual(SHORTLIST_QUOTAS["mitigation"], 6)
+        with self.assertRaisesRegex(ValueError, "beam_width"):
+            PublicStateRobustTeacher(beam_width=4)
+        with self.assertRaisesRegex(ValueError, "root horizon"):
+            first, second = paired_minimal_examples_v2()
+            PublicStateRobustTeacher().decide(
+                [instantiate_scenario(first), instantiate_scenario(second)],
+                horizon=2,
+            )
 
     def test_public_teacher_belief_updates_only_from_public_tool_evidence(self):
         first, _ = paired_minimal_examples_v2()
@@ -201,7 +263,7 @@ class RecoveryProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "minimum"):
             PublicStateRobustTeacher().decide(
                 [instantiate_scenario(first)],
-                horizon=1,
+                horizon=3,
             )
 
     def test_dynamic_sampling_requests_two_more_then_filters_or_uses(self):
@@ -240,22 +302,81 @@ class RecoveryProtocolTests(unittest.TestCase):
         )
         self.assertTrue(useful.usable_for_policy_gradient)
         self.assertTrue(summarize_update_batch([useful])["policy_update_allowed"])
+        partial_progress = evaluate_rollout_group(
+            [
+                {
+                    "scenario_id": "partial",
+                    "reward": value,
+                    "action_class": action,
+                    "safe_success": False,
+                }
+                for value, action in (
+                    (-1.0, "observe"),
+                    (-0.7, "active_probe"),
+                    (-0.2, "trust"),
+                    (0.1, "mitigation"),
+                )
+            ]
+        )
+        self.assertTrue(partial_progress.all_failed)
+        self.assertTrue(partial_progress.usable_for_policy_gradient)
 
     def test_recovery_reward_gives_no_positive_format_reward(self):
-        reward = compute_recovery_reward(
-            {
-                "parse_ok": True,
-                "schema_ok": True,
-                "action": "Observe",
-                "teacher_advantage": 0.20,
-                "counterfactual_advantage": -0.2,
-            }
-        )
+        signals = {
+            "parse_ok": True,
+            "schema_ok": True,
+            "safe_success": False,
+            "attack_success": False,
+            "action": "Observe",
+            "teacher_advantage": 0.20,
+            "counterfactual_advantage": -0.2,
+            "new_evidence": False,
+            "uncertainty_reduced": False,
+            "probe_grounded_state_update": False,
+            "probe_grounded_authorization": False,
+            "probe_counterfactual_improvement": False,
+            "correct_state_transitions": 0,
+            "false_state_transitions": 0,
+            "business_cost": 0.0,
+            "verification_cost": 0.0,
+            "delay": 0.0,
+            "core_utility": -0.1,
+        }
+        self.assertEqual(set(signals), set(REQUIRED_RECOVERY_SIGNALS))
+        reward = compute_recovery_reward(signals)
         self.assertEqual(reward["format_component"], 0.0)
         self.assertLess(reward["noop_component"], 0.0)
-        invalid = compute_recovery_reward({"parse_ok": False, "schema_ok": False})
+        invalid_signals = dict(signals, parse_ok=False, schema_ok=False)
+        invalid = compute_recovery_reward(invalid_signals)
         self.assertLess(invalid["overall"], 0.0)
         self.assertFalse(invalid["normal_environment_action_allowed"])
+        missing = dict(signals)
+        missing.pop("teacher_advantage")
+        with self.assertRaisesRegex(RuntimeError, "teacher_advantage"):
+            compute_recovery_reward(missing)
+
+        smoke_rows = []
+        for index in range(32):
+            row = dict(signals)
+            row.update(
+                {
+                    "action": "SourceChallenge" if index % 3 == 0 else "Observe",
+                    "teacher_advantage": index / 31.0,
+                    "counterfactual_advantage": (index - 16) / 16.0,
+                    "core_utility": 0.6 if index % 2 == 0 else -0.6,
+                    "new_evidence": index % 3 == 0,
+                    "correct_state_transitions": int(index % 4 == 0),
+                }
+            )
+            smoke_rows.append(row)
+        self.assertTrue(validate_recovery_signal_batch(smoke_rows)["accepted"])
+        broken_smoke = copy.deepcopy(smoke_rows)
+        broken_smoke[0].pop("teacher_advantage")
+        broken_verdict = validate_recovery_signal_batch(broken_smoke)
+        self.assertFalse(broken_verdict["accepted"])
+        self.assertTrue(
+            any("teacher_advantage" in item for item in broken_verdict["failures"])
+        )
 
     def test_stage0_gate_is_strictly_ordered_and_fail_closed(self):
         metrics = {
@@ -286,6 +407,13 @@ class RecoveryProtocolTests(unittest.TestCase):
             },
         }
         self.assertTrue(evaluate_stage0_gate(metrics).accepted)
+        self.assertEqual(
+            evaluate_stage0_gate(metrics).next_stage,
+            "bootstrap_data_build_and_audit",
+        )
+        diagnostic_only = copy.deepcopy(metrics)
+        diagnostic_only["random_legal"]["safe_utility"] = 0.05
+        self.assertTrue(evaluate_stage0_gate(diagnostic_only).accepted)
         broken = copy.deepcopy(metrics)
         broken["public_state_teacher"]["safe_utility"] = 0.15
         self.assertFalse(evaluate_stage0_gate(broken).accepted)
@@ -356,18 +484,21 @@ class RecoveryProtocolTests(unittest.TestCase):
         audits = []
         for index, category in enumerate(categories):
             record_id = f"r-{index}"
+            prompt_variant = prompt + (" " * index)
             train.append(
                 {
                     "record_id": record_id,
                     "messages": [
-                        {"role": "user", "content": prompt},
+                        {"role": "user", "content": prompt_variant},
                         {"role": "assistant", "content": target},
                     ],
-                    "prompt": prompt,
+                    "prompt": prompt_variant,
                     "target": target,
                     "public_state_digest": public_state_digest(env.observe()),
                     "action_category": category,
-                    "source_policy": "public_state_robust_teacher",
+                    "source_policy": (
+                        "finite_counterfactual_public_state_robust_teacher"
+                    ),
                 }
             )
             audits.append(
@@ -378,6 +509,8 @@ class RecoveryProtocolTests(unittest.TestCase):
                     "model_target_hidden_state": False,
                     "hidden_state_usage": "offline_robust_utility_only",
                     "world_count": 2,
+                    "q_audit": {"a": 0.0, "b": 1.0},
+                    "core_q_audit": {"a": 0.0, "b": 1.0},
                 }
             )
         result = audit_bootstrap_records(train, audits)

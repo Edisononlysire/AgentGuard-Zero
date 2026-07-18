@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from statistics import mean
 from typing import Any, Iterable, Mapping, Sequence
@@ -16,6 +16,10 @@ from agentguard_zero.recovery.public_teacher import (
     PublicStateRobustTeacher,
     admitted_public_candidates,
     public_state_digest,
+)
+from agentguard_zero.recovery.utility import (
+    recovery_core_utility,
+    spearman_rank_correlation,
 )
 from agentguard_zero.runtime_policy import HIGH_IMPACT_ACTIONS
 from agentguard_zero.schemas.action_schema import OBJECTIVE_KEYS
@@ -50,9 +54,7 @@ def _random_legal_packet(env: Any) -> dict[str, Any]:
     ]
     if context_relevant_mitigations:
         candidates = [
-            candidate
-            for candidate in candidates
-            if candidate.category != "mitigation"
+            candidate for candidate in candidates if candidate.category != "mitigation"
         ] + context_relevant_mitigations
     # Sample action classes uniformly before sampling an action. Sampling the
     # flat enumeration would overweight classes that merely have more public
@@ -205,11 +207,21 @@ def run_public_teacher_group(
     *,
     teacher: PublicStateRobustTeacher | None = None,
 ) -> list[tuple[Any, dict[str, Any]]]:
+    episodes, _ = _run_public_teacher_group_with_audit(scenarios, teacher=teacher)
+    return episodes
+
+
+def _run_public_teacher_group_with_audit(
+    scenarios: Sequence[Mapping[str, Any]],
+    *,
+    teacher: PublicStateRobustTeacher | None = None,
+) -> tuple[list[tuple[Any, dict[str, Any]]], list[dict[str, Any]]]:
     if len(scenarios) < 2:
         raise ValueError("public teacher group requires multiple hidden worlds")
     policy = teacher or PublicStateRobustTeacher()
     live = [instantiate_scenario(copy.deepcopy(dict(item))) for item in scenarios]
     completed: list[Any] = []
+    decision_audit: list[dict[str, Any]] = []
     first_decision = True
     while live:
         groups: dict[str, list[Any]] = defaultdict(list)
@@ -222,6 +234,7 @@ def run_public_teacher_group(
                 horizon=3,
                 enforce_min_worlds=first_decision,
             )
+            decision_audit.append(decision.to_audit_dict())
             for env in group:
                 env.step(copy.deepcopy(decision.selected_packet))
                 if env.t >= env.max_steps or env.attack_mitigated or env.attack_success:
@@ -230,7 +243,10 @@ def run_public_teacher_group(
                     next_live.append(env)
         live = next_live
         first_decision = False
-    return [(env, score_trajectory_v2(env)) for env in completed]
+    return (
+        [(env, score_trajectory_v2(env)) for env in completed],
+        decision_audit,
+    )
 
 
 def _fixed_policy_worker(
@@ -242,33 +258,52 @@ def _fixed_policy_worker(
 
 def _teacher_group_worker(
     payload: tuple[Sequence[Mapping[str, Any]], PublicStateRobustTeacher],
-) -> list[tuple[Any, dict[str, Any]]]:
+) -> tuple[list[tuple[Any, dict[str, Any]]], list[dict[str, Any]]]:
     scenarios, teacher = payload
-    return run_public_teacher_group(scenarios, teacher=teacher)
+    return _run_public_teacher_group_with_audit(scenarios, teacher=teacher)
+
+
+def _summarize_teacher_decisions(
+    decisions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    categories = Counter(str(item.get("selected_category", "")) for item in decisions)
+    correlations: list[float] = []
+    for item in decisions:
+        q_values = item.get("q_audit", {})
+        core_values = item.get("core_q_audit", {})
+        if not isinstance(q_values, dict) or not isinstance(core_values, dict):
+            continue
+        shared = sorted(set(q_values).intersection(core_values))
+        correlation = spearman_rank_correlation(
+            [float(q_values[key]) for key in shared],
+            [float(core_values[key]) for key in shared],
+        )
+        if correlation is not None:
+            correlations.append(correlation)
+    return {
+        "decision_count": len(decisions),
+        "selected_action_category_counts": dict(categories),
+        "mean_public_candidate_count": (
+            mean(float(item.get("public_candidate_count", 0.0)) for item in decisions)
+            if decisions
+            else 0.0
+        ),
+        "mean_admitted_candidate_count": (
+            mean(float(item.get("admitted_candidate_count", 0.0)) for item in decisions)
+            if decisions
+            else 0.0
+        ),
+        "teacher_core_rank_correlation_mean": (
+            mean(correlations) if correlations else None
+        ),
+        "teacher_core_rank_correlation_state_count": len(correlations),
+    }
 
 
 def recovery_safe_utility(env: Any, score: Mapping[str, Any]) -> float:
-    budget = float(env.scenario.get("defense_constraints", {}).get("business_budget", 5.0))
-    business = min(1.0, float(score.get("business_cost", 0.0)) / max(1.0, budget))
-    verification = min(
-        1.0,
-        float(score.get("verification_cost", 0.0)) / max(1.0, env.max_steps),
-    )
-    delay = min(1.0, max(0.0, float(score.get("delay", 0.0))))
-    unauthorized = min(
-        1.0,
-        float(score.get("unauthorized_high_impact", 0.0)) / max(1.0, env.max_steps),
-    )
-    return float(
-        0.35 * float(bool(score.get("attack_mitigated", False)))
-        + 0.20 * float(bool(score.get("correct_intent", False)))
-        + 0.05 * float(score.get("probe_result_availability_rate", 0.0))
-        - 0.20 * business
-        - 0.15 * float(bool(score.get("overresponse", False)))
-        - 0.05 * verification
-        - 0.05 * delay
-        - 0.15 * unauthorized
-    )
+    """Backward-compatible name for the shared recovery core utility."""
+
+    return recovery_core_utility(env, score)
 
 
 def summarize_fixed_policy(
@@ -279,9 +314,7 @@ def summarize_fixed_policy(
         raise ValueError("fixed policy has no episodes")
     return {
         "scenario_count": len(rows),
-        "safe_utility": mean(
-            recovery_safe_utility(env, score) for env, score in rows
-        ),
+        "safe_utility": mean(recovery_safe_utility(env, score) for env, score in rows),
         "attack_mitigation": mean(
             float(bool(score.get("attack_mitigated", False))) for _, score in rows
         ),
@@ -312,8 +345,14 @@ def run_stage0_suite(
                 run_fixed_policy_episode(scenario, name) for scenario in scenarios
             )
         teacher_episodes: list[tuple[Any, Mapping[str, Any]]] = []
+        teacher_decisions: list[dict[str, Any]] = []
         for group in scenario_groups:
-            teacher_episodes.extend(run_public_teacher_group(group, teacher=policy))
+            episodes, decisions = _run_public_teacher_group_with_audit(
+                group,
+                teacher=policy,
+            )
+            teacher_episodes.extend(episodes)
+            teacher_decisions.extend(decisions)
     else:
         with ProcessPoolExecutor(max_workers=int(workers)) as executor:
             for name in ("no_op", "random_legal", "overreact", "oracle"):
@@ -324,10 +363,15 @@ def run_stage0_suite(
                     )
                 )
             teacher_episodes = []
-            for rows in executor.map(
+            teacher_decisions = []
+            for rows, decisions in executor.map(
                 _teacher_group_worker,
                 ((group, policy) for group in scenario_groups),
             ):
                 teacher_episodes.extend(rows)
+                teacher_decisions.extend(decisions)
     results["public_state_teacher"] = summarize_fixed_policy(teacher_episodes)
+    results["public_state_teacher"].update(
+        _summarize_teacher_decisions(teacher_decisions)
+    )
     return results

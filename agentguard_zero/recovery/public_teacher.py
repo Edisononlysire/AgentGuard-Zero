@@ -1,4 +1,4 @@
-"""Public-State Robust Teacher for automatic action-support bootstrap data.
+"""Finite-Counterfactual Public-State Robust Teacher.
 
 Candidate construction reads public observations only. Hidden simulator state is
 consulted exclusively when scoring cloned trajectories, and a single action is
@@ -16,6 +16,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from agentguard_zero.env.oracle_v2 import score_trajectory_v2
+from agentguard_zero.recovery.utility import (
+    RecoveryCoreUtilityConfig,
+    recovery_core_utility,
+)
 from agentguard_zero.schemas.action_schema import OBJECTIVE_KEYS
 from agentguard_zero.schemas.action_schema_v4 import (
     DEFAULT_ACTION_PACKET_V4,
@@ -33,13 +37,22 @@ TARGETED_ACTIONS = {
     "Restore",
     "Remove",
 }
-ACTION_HORIZONS = {
-    "observe": 2,
+ACTION_CATEGORIES = (
+    "observe",
+    "passive_verification",
+    "active_probe",
+    "trust",
+    "memory",
+    "mitigation",
+)
+ACTION_HORIZONS = {category: 3 for category in ACTION_CATEGORIES}
+SHORTLIST_QUOTAS = {
+    "observe": 1,
     "passive_verification": 3,
-    "active_probe": 3,
+    "active_probe": 4,
     "trust": 3,
     "memory": 3,
-    "mitigation": 2,
+    "mitigation": 6,
 }
 
 
@@ -87,6 +100,7 @@ class TeacherDecision:
     world_count: int
     search_horizon: int
     q_audit: dict[str, float]
+    core_q_audit: dict[str, float]
     hidden_state_in_target: bool = False
 
     def to_audit_dict(self) -> dict[str, Any]:
@@ -100,6 +114,7 @@ class _SearchOption:
     candidate: ActionCandidate
     final_worlds: list[Any]
     robust_value: float
+    core_value: float
 
 
 @dataclass
@@ -109,6 +124,7 @@ class _SearchResult:
     public_candidate_count: int
     admitted_candidate_count: int
     q_audit: dict[str, float]
+    core_q_audit: dict[str, float]
 
 
 def canonical_public_json(value: Any) -> str:
@@ -124,7 +140,9 @@ def canonical_public_json(value: Any) -> str:
 
 
 def public_state_digest(observation: Mapping[str, Any]) -> str:
-    return hashlib.sha256(canonical_public_json(dict(observation)).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        canonical_public_json(dict(observation)).encode("utf-8")
+    ).hexdigest()
 
 
 def compact_wire_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
@@ -135,18 +153,26 @@ def compact_wire_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": 4,
         "belief": copy.deepcopy(normalized["belief"]),
-        "assessment": copy.deepcopy(normalized["evidence_assessment"][0])
-        if normalized["evidence_assessment"]
-        else None,
-        "trust_operation": copy.deepcopy(normalized["trust_operations"][0])
-        if normalized["trust_operations"]
-        else None,
-        "memory_operation": copy.deepcopy(normalized["memory_operations"][0])
-        if normalized["memory_operations"]
-        else None,
-        "memory_use": copy.deepcopy(normalized["memory_usage"][0])
-        if normalized["memory_usage"]
-        else None,
+        "assessment": (
+            copy.deepcopy(normalized["evidence_assessment"][0])
+            if normalized["evidence_assessment"]
+            else None
+        ),
+        "trust_operation": (
+            copy.deepcopy(normalized["trust_operations"][0])
+            if normalized["trust_operations"]
+            else None
+        ),
+        "memory_operation": (
+            copy.deepcopy(normalized["memory_operations"][0])
+            if normalized["memory_operations"]
+            else None
+        ),
+        "memory_use": (
+            copy.deepcopy(normalized["memory_usage"][0])
+            if normalized["memory_usage"]
+            else None
+        ),
         "uncertainty": float(normalized["uncertainty"]),
         "tool_call": copy.deepcopy(normalized["tool_call"]),
         "safety_check": copy.deepcopy(normalized["safety_check"]),
@@ -187,9 +213,7 @@ def public_inventory(observation: Mapping[str, Any]) -> PublicInventory:
     ]
     assets = [
         item
-        for item in (obs.get("defense_context", {}) or {}).get(
-            "public_assets", []
-        )
+        for item in (obs.get("defense_context", {}) or {}).get("public_assets", [])
         if isinstance(item, dict) and str(item.get("id", "")).strip()
     ]
     evidence_by_event: dict[str, list[str]] = {}
@@ -206,9 +230,7 @@ def public_inventory(observation: Mapping[str, Any]) -> PublicInventory:
     }
     memory_ids = {
         str(item.get("memory_id", "")).strip()
-        for item in _walk_dicts(
-            (obs.get("defender_state", {}) or {}).get("memory", {})
-        )
+        for item in _walk_dicts((obs.get("defender_state", {}) or {}).get("memory", {}))
         if str(item.get("memory_id", "")).strip()
     }
     return PublicInventory(
@@ -243,7 +265,9 @@ def _public_belief(observation: Mapping[str, Any]) -> dict[str, float]:
         if not isinstance(row, dict):
             continue
         content = row.get("content", {}) or {}
-        semantics = content.get("claim_semantics", {}) if isinstance(content, dict) else {}
+        semantics = (
+            content.get("claim_semantics", {}) if isinstance(content, dict) else {}
+        )
         objective = str(semantics.get("object", "")).strip()
         event_id = str(row.get("event_id", "")).strip()
         if objective in support:
@@ -265,7 +289,10 @@ def _public_belief(observation: Mapping[str, Any]) -> dict[str, float]:
         "inconsistent",
     }
     for row in evidence:
-        if not isinstance(row, dict) or str(row.get("evidence_origin", "")) != "tool_generated":
+        if (
+            not isinstance(row, dict)
+            or str(row.get("evidence_origin", "")) != "tool_generated"
+        ):
             continue
         objective = objective_by_event.get(str(row.get("event_id", "")), "")
         if objective not in support:
@@ -289,10 +316,7 @@ def _public_belief(observation: Mapping[str, Any]) -> dict[str, float]:
             if objective in support:
                 support[objective] += 0.50
     minimum = min(support.values())
-    shifted = {
-        key: value - min(0.0, minimum) + 0.25
-        for key, value in support.items()
-    }
+    shifted = {key: value - min(0.0, minimum) + 0.25 for key, value in support.items()}
     total = sum(shifted.values())
     if total <= 0.0:
         return {key: 0.25 for key in OBJECTIVE_KEYS}
@@ -400,9 +424,7 @@ def _memory_candidate(
                 key: str(semantics.get(key, ""))
                 for key in ("entity_id", "predicate", "object", "scope")
             },
-            "source_ids": [
-                str(event.get("source_id") or event.get("source") or "")
-            ],
+            "source_ids": [str(event.get("source_id") or event.get("source") or "")],
             "evidence_refs": list(evidence_refs),
             "target_status": "quarantined",
         }
@@ -441,7 +463,10 @@ def _candidate_is_public(
     memories = set(inventory.memory_ids)
 
     response = packet.get("response", {}) or {}
-    if response.get("action") in TARGETED_ACTIONS and response.get("target") not in assets:
+    if (
+        response.get("action") in TARGETED_ACTIONS
+        and response.get("target") not in assets
+    ):
         return False
     tool = packet.get("tool_call", {}) or {}
     args = tool.get("args", {}) or {}
@@ -458,7 +483,10 @@ def _candidate_is_public(
     if "zone" in args and str(args["zone"]) not in zones:
         return False
     nested_action = args.get("action")
-    if isinstance(nested_action, dict) and str(nested_action.get("target", "")) not in assets:
+    if (
+        isinstance(nested_action, dict)
+        and str(nested_action.get("target", "")) not in assets
+    ):
         return False
 
     for operation in packet.get("trust_operations", []) or []:
@@ -473,7 +501,10 @@ def _candidate_is_public(
             return False
         if not set(map(str, operation.get("evidence_refs", []))).issubset(evidence_ids):
             return False
-        if operation.get("op") != "ingest" and str(operation.get("memory_id", "")) not in memories:
+        if (
+            operation.get("op") != "ingest"
+            and str(operation.get("memory_id", "")) not in memories
+        ):
             return False
     return True
 
@@ -672,11 +703,7 @@ def enumerate_public_candidates(
         if first is not None:
             selected.append(first)
     selected_ids = {item.candidate_id for item in selected}
-    selected.extend(
-        item
-        for item in ordered
-        if item.candidate_id not in selected_ids
-    )
+    selected.extend(item for item in ordered if item.candidate_id not in selected_ids)
     return selected[: max(1, int(max_candidates))]
 
 
@@ -740,7 +767,7 @@ def _simulate_one_step(env: Any, candidate: ActionCandidate) -> Any | None:
     return cloned
 
 
-def teacher_rollout_utility(env: Any) -> float:
+def teacher_rollout_shaping(env: Any) -> float:
     score = score_trajectory_v2(env)
     pressure = float(getattr(env.hidden_world, "attack_pressure", 1.0))
     pressure_reduction = max(0.0, min(1.0, 1.0 - pressure))
@@ -754,24 +781,35 @@ def teacher_rollout_utility(env: Any) -> float:
         for item in step.get(key, []) or []
         if isinstance(item, dict)
     )
-    budget = float(env.scenario.get("defense_constraints", {}).get("business_budget", 5.0))
-    normalized_business = float(env.business_cost) / max(1.0, budget)
-    normalized_verification = float(env.verification_cost) / max(1.0, env.max_steps)
-    return float(
-        2.0 * float(bool(score.get("safe_success", False)))
-        + 1.5 * float(bool(score.get("attack_mitigated", False)))
-        - 2.0 * float(bool(score.get("attack_success", False)))
-        + 1.25 * pressure_reduction
-        + 0.20 * float(bool(score.get("correct_intent", False)))
-        + 0.15 * probe_information
-        + 0.10 * float(score.get("probe_yield", 0.0))
-        + 0.05 * min(2, state_commits)
-        - 0.20 * float(score.get("delay", 0.0))
-        - 0.30 * normalized_business
-        - 0.10 * normalized_verification
-        - 0.50 * float(bool(score.get("overresponse", False)))
-        - 0.25 * float(score.get("invalid_state_operations", 0.0))
+    state_quality = max(
+        -1.0,
+        min(
+            1.0,
+            float(score.get("state_reward_component", 0.0)) / 0.25,
+        ),
     )
+    # Shaping is intentionally bounded to 25% of one mitigation outcome.  It
+    # may break ties among partial trajectories, but cannot replace U_core.
+    return float(
+        0.13 * pressure_reduction
+        + 0.02 * float(bool(score.get("correct_intent", False)))
+        + 0.03 * probe_information
+        + 0.01 * min(1.0, float(score.get("probe_yield", 0.0)))
+        # Reward only offline-validated state quality. A committed but harmful
+        # trust/memory transition receives negative shaping; a correct one may
+        # clear the 0.05 action threshold after public evidence disambiguates
+        # the matched worlds.
+        + 0.06 * min(1, state_commits) * state_quality
+    )
+
+
+def teacher_rollout_utility(env: Any) -> float:
+    cfg = RecoveryCoreUtilityConfig()
+    core = recovery_core_utility(env, score_trajectory_v2(env), cfg)
+    shaping = teacher_rollout_shaping(env)
+    if abs(shaping) > cfg.teacher_shaping_cap + 1.0e-12:
+        raise RuntimeError("teacher shaping exceeds the frozen core-utility cap")
+    return float(core + shaping)
 
 
 class PublicStateRobustTeacher:
@@ -780,17 +818,110 @@ class PublicStateRobustTeacher:
         *,
         advantage_delta: float = 0.05,
         min_worlds_per_public_state: int = 2,
-        beam_width: int = 4,
+        beam_width: int = 20,
         max_candidates: int = 96,
     ) -> None:
         if advantage_delta < 0.0:
             raise ValueError("advantage_delta must be non-negative")
         if min_worlds_per_public_state < 2:
             raise ValueError("robust teacher requires at least two hidden worlds")
+        if not 16 <= int(beam_width) <= 24:
+            raise ValueError("formal teacher beam_width must be in [16,24]")
+        if int(max_candidates) < int(beam_width):
+            raise ValueError("max_candidates must be at least beam_width")
         self.advantage_delta = float(advantage_delta)
         self.min_worlds = int(min_worlds_per_public_state)
-        self.beam_width = max(1, int(beam_width))
+        self.beam_width = int(beam_width)
+        self.continuation_beam_width = min(8, self.beam_width)
         self.max_candidates = max(1, int(max_candidates))
+
+    @staticmethod
+    def _candidate_family(candidate: ActionCandidate) -> str:
+        parts = candidate.label.split(":")
+        if candidate.category in {"trust", "memory"}:
+            return ":".join(parts[:2])
+        return parts[0]
+
+    def _candidate_pool(
+        self,
+        candidates: Sequence[ActionCandidate],
+        *,
+        continuation_mode: bool,
+        observation: Mapping[str, Any],
+    ) -> list[ActionCandidate]:
+        """Choose a public-only diverse pool before expensive world cloning.
+
+        The former implementation scored all candidates for one step and then
+        kept one per category.  This deterministic family-balanced pool avoids
+        that myopic pruning while keeping H=3 planning computationally finite.
+        """
+
+        limit = (
+            self.continuation_beam_width
+            if continuation_mode
+            else min(
+                self.max_candidates,
+                self.beam_width + 12,
+            )
+        )
+        selected: list[ActionCandidate] = []
+
+        def add(candidate: ActionCandidate) -> None:
+            if all(row.candidate_id != candidate.candidate_id for row in selected):
+                selected.append(candidate)
+
+        observed_entities = {
+            str(item.get("entity_id", "")).strip()
+            for item in observation.get("observed_events", []) or []
+            if isinstance(item, dict) and str(item.get("entity_id", "")).strip()
+        }
+        for category in ACTION_CATEGORIES:
+
+            def public_priority(row: ActionCandidate) -> tuple[Any, ...]:
+                response = row.packet.get("response", {}) or {}
+                target = str(response.get("target", ""))
+                mitigation_order = {
+                    "ShadowBlock": 0,
+                    "LimitSession": 1,
+                    "DeployDecoy": 2,
+                    "Restore": 3,
+                    "Remove": 4,
+                    "Isolate": 5,
+                }
+                return (
+                    0 if target in observed_entities else 1,
+                    (
+                        mitigation_order.get(str(response.get("action", "")), 0)
+                        if row.category == "mitigation"
+                        else 0
+                    ),
+                    row.label,
+                    row.candidate_id,
+                )
+
+            rows = sorted(
+                (row for row in candidates if row.category == category),
+                key=public_priority,
+            )
+            quota = 1 if continuation_mode else SHORTLIST_QUOTAS[category] + 1
+            families: set[str] = set()
+            for row in rows:
+                family = self._candidate_family(row)
+                if family in families:
+                    continue
+                add(row)
+                families.add(family)
+                if sum(item.category == category for item in selected) >= quota:
+                    break
+            for row in rows:
+                if sum(item.category == category for item in selected) >= quota:
+                    break
+                add(row)
+        for row in candidates:
+            if len(selected) >= limit:
+                break
+            add(row)
+        return selected[:limit]
 
     def _public_observation(self, worlds: Sequence[Any]) -> dict[str, Any]:
         if not worlds:
@@ -818,27 +949,50 @@ class PublicStateRobustTeacher:
         self,
         options: Sequence[_SearchOption],
     ) -> list[_SearchOption]:
-        by_category: dict[str, _SearchOption] = {}
-        for item in sorted(
-            options,
-            key=lambda row: (-row.robust_value, row.candidate.candidate_id),
-        ):
-            by_category.setdefault(item.candidate.category, item)
-        mandatory = list(by_category.values())
         ranked = sorted(
             options,
             key=lambda row: (-row.robust_value, row.candidate.candidate_id),
         )
         selected: list[_SearchOption] = []
-        for item in [*mandatory, *ranked]:
+
+        def add(item: _SearchOption) -> None:
             if any(
                 seen.candidate.candidate_id == item.candidate.candidate_id
                 for seen in selected
             ):
-                continue
+                return
             selected.append(item)
-            if len(selected) >= max(self.beam_width, len(mandatory)):
+
+        # First preserve a diverse set inside every class.  Candidate labels
+        # encode the tool/operation/mitigation family before the final target.
+        # This prevents a one-step tie from deleting every alternative probe or
+        # every alternative response before the H=3 comparison.
+        for category in ACTION_CATEGORIES:
+            category_rows = [
+                item for item in ranked if item.candidate.category == category
+            ]
+            quota = SHORTLIST_QUOTAS[category]
+            family_seen: set[str] = set()
+            for item in category_rows:
+                parts = item.candidate.label.split(":")
+                family = (
+                    ":".join(parts[:2]) if category in {"trust", "memory"} else parts[0]
+                )
+                if family in family_seen:
+                    continue
+                add(item)
+                family_seen.add(family)
+                if sum(row.candidate.category == category for row in selected) >= quota:
+                    break
+            for item in category_rows:
+                if sum(row.candidate.category == category for row in selected) >= quota:
+                    break
+                add(item)
+
+        for item in ranked:
+            if len(selected) >= self.beam_width:
                 break
+            add(item)
         observe = next(
             (item for item in options if item.candidate.category == "observe"),
             None,
@@ -855,26 +1009,38 @@ class PublicStateRobustTeacher:
         worlds: Sequence[Any],
         horizon: int,
     ) -> list[Any]:
-        completed = [
-            world
-            for world in worlds
-            if world.t >= world.max_steps
-            or world.attack_mitigated
-            or world.attack_success
-        ]
-        live = [world for world in worlds if world not in completed]
-        if horizon <= 0 or not live:
-            return [*completed, *live]
-        grouped: dict[str, list[Any]] = {}
-        for world in live:
-            observation = world.observe()
-            grouped.setdefault(public_state_digest(observation), []).append(world)
-        continued: list[Any] = list(completed)
-        for group in grouped.values():
-            continued.extend(
-                self._search(group, horizon, enforce_min_worlds=False).selected.final_worlds
-            )
-        return continued
+        # Evaluate every root candidate over the same H=3, then use a greedy
+        # receding-horizon public policy for its continuation.  This is a
+        # finite-counterfactual beam rollout, not an exponential exhaustive
+        # minimax tree; the distinction is recorded in the method claim.
+        current = list(worlds)
+        for _ in range(max(0, horizon)):
+            completed = [
+                world
+                for world in current
+                if world.t >= world.max_steps
+                or world.attack_mitigated
+                or world.attack_success
+            ]
+            live = [world for world in current if world not in completed]
+            if not live:
+                return completed
+            grouped: dict[str, list[Any]] = {}
+            for world in live:
+                observation = world.observe()
+                grouped.setdefault(public_state_digest(observation), []).append(world)
+            continued: list[Any] = list(completed)
+            for group in grouped.values():
+                continued.extend(
+                    self._search(
+                        group,
+                        1,
+                        enforce_min_worlds=False,
+                        continuation_mode=True,
+                    ).selected.final_worlds
+                )
+            current = continued
+        return current
 
     def _search(
         self,
@@ -882,6 +1048,7 @@ class PublicStateRobustTeacher:
         horizon: int,
         *,
         enforce_min_worlds: bool,
+        continuation_mode: bool = False,
     ) -> _SearchResult:
         if enforce_min_worlds and len(worlds) < self.min_worlds:
             raise ValueError(
@@ -894,7 +1061,12 @@ class PublicStateRobustTeacher:
             max_candidates=self.max_candidates,
         )
         immediate: list[_SearchOption] = []
-        for candidate in public_candidates:
+        candidate_pool = self._candidate_pool(
+            public_candidates,
+            continuation_mode=continuation_mode,
+            observation=observation,
+        )
+        for candidate in candidate_pool:
             next_worlds = self._simulate_candidate(worlds, candidate)
             if next_worlds is None:
                 continue
@@ -902,7 +1074,13 @@ class PublicStateRobustTeacher:
                 _SearchOption(
                     candidate=candidate,
                     final_worlds=next_worlds,
-                    robust_value=min(teacher_rollout_utility(item) for item in next_worlds),
+                    robust_value=min(
+                        teacher_rollout_utility(item) for item in next_worlds
+                    ),
+                    core_value=min(
+                        recovery_core_utility(item, score_trajectory_v2(item))
+                        for item in next_worlds
+                    ),
                 )
             )
         if not immediate:
@@ -910,10 +1088,7 @@ class PublicStateRobustTeacher:
 
         completed: list[_SearchOption] = []
         for option in self._shortlist(immediate):
-            option_horizon = min(
-                horizon,
-                ACTION_HORIZONS.get(option.candidate.category, horizon),
-            )
+            option_horizon = min(horizon, ACTION_HORIZONS[option.candidate.category])
             final_worlds = (
                 self._continue_groups(option.final_worlds, option_horizon - 1)
                 if option_horizon > 1
@@ -925,6 +1100,10 @@ class PublicStateRobustTeacher:
                     final_worlds=final_worlds,
                     robust_value=min(
                         teacher_rollout_utility(item) for item in final_worlds
+                    ),
+                    core_value=min(
+                        recovery_core_utility(item, score_trajectory_v2(item))
+                        for item in final_worlds
                     ),
                 )
             )
@@ -950,6 +1129,10 @@ class PublicStateRobustTeacher:
                 item.candidate.candidate_id: float(item.robust_value)
                 for item in completed
             },
+            core_q_audit={
+                item.candidate.candidate_id: float(item.core_value)
+                for item in completed
+            },
         )
 
     def decide(
@@ -959,8 +1142,8 @@ class PublicStateRobustTeacher:
         horizon: int = 3,
         enforce_min_worlds: bool = True,
     ) -> TeacherDecision:
-        if horizon < 1 or horizon > 3:
-            raise ValueError("teacher horizon must be in [1,3]")
+        if horizon != 3:
+            raise ValueError("formal teacher root horizon must equal 3")
         observation = self._public_observation(worlds)
         result = self._search(
             worlds,
@@ -978,12 +1161,11 @@ class PublicStateRobustTeacher:
             selected_packet=packet,
             robust_value=float(selected.robust_value),
             observe_value=float(observe.robust_value),
-            advantage_over_observe=float(
-                selected.robust_value - observe.robust_value
-            ),
+            advantage_over_observe=float(selected.robust_value - observe.robust_value),
             public_candidate_count=result.public_candidate_count,
             admitted_candidate_count=result.admitted_candidate_count,
             world_count=len(worlds),
             search_horizon=int(horizon),
             q_audit=result.q_audit,
+            core_q_audit=result.core_q_audit,
         )

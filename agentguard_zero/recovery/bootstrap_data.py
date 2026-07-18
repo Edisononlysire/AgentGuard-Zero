@@ -17,6 +17,7 @@ from agentguard_zero.recovery.public_teacher import (
 from agentguard_zero.schemas.action_schema_v4 import parse_action_json_v4
 from agentguard_zero.training.vda_dataset import build_vda_prompt
 from agentguard_zero.world.public_projector import assert_public
+from agentguard_zero.recovery.utility import spearman_rank_correlation
 
 
 ACTION_CATEGORIES = (
@@ -68,9 +69,12 @@ def build_bootstrap_records(
     policy = teacher or PublicStateRobustTeacher()
     train_records: list[dict[str, Any]] = []
     audit_records: list[dict[str, Any]] = []
+    emitted_decisions: set[tuple[str, str]] = set()
     scenario_count = sum(len(group) for group in scenario_groups)
     if not scenario_groups or any(len(group) < 2 for group in scenario_groups):
-        raise ValueError("every initial public-state group must contain at least two worlds")
+        raise ValueError(
+            "every initial public-state group must contain at least two worlds"
+        )
 
     for group_index, scenarios in enumerate(scenario_groups):
         live = [instantiate_scenario(copy.deepcopy(dict(item))) for item in scenarios]
@@ -105,19 +109,19 @@ def build_bootstrap_records(
                 _, valid, reason = parse_action_json_v4(target)
                 if not valid:
                     raise ValueError(f"teacher emitted an invalid target: {reason}")
-                replica_count = min(
-                    len(public_group),
-                    max_records - len(train_records),
-                )
                 source_hashes = sorted(
                     _scenario_hash(env.scenario) for env in public_group
                 )
-                for replica_index in range(replica_count):
+                decision_key = (
+                    decision.public_state_digest,
+                    decision.selected_candidate_id,
+                )
+                if decision_key not in emitted_decisions:
                     record_id = hashlib.sha256(
                         (
                             f"{decision.public_state_digest}:"
                             f"{decision.selected_candidate_id}:"
-                            f"{group_index}:{decision_index}:{replica_index}"
+                            f"{group_index}:{decision_index}"
                         ).encode("utf-8")
                     ).hexdigest()
                     train_records.append(
@@ -131,7 +135,9 @@ def build_bootstrap_records(
                             "target": target,
                             "public_state_digest": decision.public_state_digest,
                             "action_category": decision.selected_category,
-                            "source_policy": "public_state_robust_teacher",
+                            "source_policy": (
+                                "finite_counterfactual_public_state_robust_teacher"
+                            ),
                         }
                     )
                     audit = decision.to_audit_dict()
@@ -140,8 +146,7 @@ def build_bootstrap_records(
                             "record_id": record_id,
                             "initial_group_index": group_index,
                             "decision_index": decision_index,
-                            "public_state_replica_index": replica_index,
-                            "public_state_replica_count": len(public_group),
+                            "world_count": len(public_group),
                             "source_scenario_hashes": source_hashes,
                             "target_sha256": hashlib.sha256(
                                 target.encode("utf-8")
@@ -152,6 +157,7 @@ def build_bootstrap_records(
                         }
                     )
                     audit_records.append(audit)
+                    emitted_decisions.add(decision_key)
                 decision_index += 1
                 for env in public_group:
                     env.step(copy.deepcopy(decision.selected_packet))
@@ -172,7 +178,7 @@ def build_bootstrap_records(
             "scenario_count": scenario_count,
             "initial_public_group_count": len(scenario_groups),
             "record_cap": max_records,
-            "teacher": "public_state_robust_max_min",
+            "teacher": ("finite_counterfactual_public_state_robust_teacher"),
             "human_action_labels": 0,
             "lineage": "new_recovery_lineage",
         }
@@ -198,6 +204,7 @@ def audit_bootstrap_records(
 
     categories: Counter[str] = Counter()
     prompt_hashes: set[str] = set()
+    prompt_target_hashes: set[str] = set()
     for row in train:
         allowed = {
             "record_id",
@@ -233,7 +240,15 @@ def audit_bootstrap_records(
         prompt_hashes.add(
             hashlib.sha256(str(row.get("prompt", "")).encode("utf-8")).hexdigest()
         )
+        prompt_target_hashes.add(
+            hashlib.sha256(
+                (
+                    str(row.get("prompt", "")) + "\x00" + str(row.get("target", ""))
+                ).encode("utf-8")
+            ).hexdigest()
+        )
 
+    rank_correlations: list[float] = []
     for row in audits:
         if row.get("hidden_state_in_target") is not False:
             failures.append("hidden_state_in_target")
@@ -245,11 +260,33 @@ def audit_bootstrap_records(
             failures.append("missing_robust_world_audit")
         if row.get("hidden_state_usage") != "offline_robust_utility_only":
             failures.append("invalid_hidden_state_usage")
+        q_values = row.get("q_audit")
+        core_q_values = row.get("core_q_audit")
+        if not isinstance(q_values, dict) or not isinstance(core_q_values, dict):
+            failures.append("missing_teacher_core_q_audit")
+            continue
+        shared = sorted(set(q_values).intersection(core_q_values))
+        if len(shared) < 2:
+            failures.append("insufficient_teacher_core_q_pairs")
+            continue
+        correlation = spearman_rank_correlation(
+            [float(q_values[key]) for key in shared],
+            [float(core_q_values[key]) for key in shared],
+        )
+        if correlation is not None:
+            rank_correlations.append(correlation)
 
     count = len(train)
+    unique_pair_ratio = len(prompt_target_hashes) / max(1, count)
+    if count and unique_pair_ratio + 1.0e-12 < 0.95:
+        failures.append("unique_prompt_target_ratio_below_95pct")
+    mean_rank_correlation = (
+        sum(rank_correlations) / len(rank_correlations) if rank_correlations else None
+    )
+    if mean_rank_correlation is None or mean_rank_correlation <= 0.50:
+        failures.append("teacher_core_rank_correlation_not_above_0.50")
     ratios = {
-        category: categories[category] / max(1, count)
-        for category in ACTION_CATEGORIES
+        category: categories[category] / max(1, count) for category in ACTION_CATEGORIES
     }
     max_ratio = max(ratios.values(), default=1.0)
     if count and max_ratio > 0.40 + 1.0e-12:
@@ -274,6 +311,10 @@ def audit_bootstrap_records(
         "record_count": count,
         "audit_record_count": len(audits),
         "unique_prompt_count": len(prompt_hashes),
+        "unique_prompt_target_count": len(prompt_target_hashes),
+        "unique_prompt_target_ratio": unique_pair_ratio,
+        "teacher_core_rank_correlation_mean": mean_rank_correlation,
+        "teacher_core_rank_correlation_state_count": len(rank_correlations),
         "action_category_counts": dict(categories),
         "action_category_ratios": ratios,
         "single_category_max_ratio": max_ratio,

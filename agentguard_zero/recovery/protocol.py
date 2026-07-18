@@ -1,8 +1,8 @@
-"""Frozen recovery constants approved after the pure on-policy failure.
+"""Frozen recovery constants proposed after the pure on-policy failure.
 
-The recovery code intentionally exposes only Gate A and Gate B as executable
-training stages. Full static-skill RL and DCA-VDA co-evolution remain locked
-until both gates have accepted artifacts.
+Only model-free Stage 0 and the repaired Bootstrap data audit are currently
+execution-approved.  SFT, DAgger, Gate B, static-skill RL, and DCA-VDA
+co-evolution remain review-locked even when review-only entrypoint code exists.
 """
 
 from __future__ import annotations
@@ -30,10 +30,10 @@ OLD_LINEAGE_DISPOSITION = {
 class TeacherConfig:
     advantage_delta: float = 0.05
     min_worlds_per_public_state: int = 2
-    normal_horizon: int = 2
-    probe_horizon: int = 3
-    beam_width: int = 4
+    common_horizon: int = 3
+    beam_width: int = 20
     max_candidates: int = 96
+    core_rank_correlation_min_exclusive: float = 0.50
     require_public_state_identity: bool = True
     require_all_world_admission: bool = True
 
@@ -60,12 +60,22 @@ class BootstrapSFTConfig:
     epochs: int = 1
     lora_rank: int = 16
     lora_alpha: int = 32
+    lora_target_modules: tuple[str, ...] = (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    )
     learning_rate: float = 1.0e-5
     effective_batch_size: int = 64
     warmup_ratio: float = 0.03
     weight_decay: float = 0.01
     initializations: tuple[str, ...] = ("qwen3.5_base", "vda_1")
     same_data_and_hyperparameters_required: bool = True
+    unique_prompt_target_ratio_min: float = 0.95
 
 
 @dataclass(frozen=True)

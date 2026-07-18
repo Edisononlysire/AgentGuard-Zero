@@ -4,11 +4,14 @@
   "execution_scope": {
     "allowed_now": [
       "stage0_fixed_policy_gate",
-      "gate_a_dual_arm_bootstrap_sft",
-      "single_dagger_correction",
-      "gate_b_10_step_rl"
+      "public_teacher_behavior_audit",
+      "bootstrap_data_build_after_accepted_stage0"
     ],
     "locked_until_teacher_review": [
+      "gate_a_dual_arm_bootstrap_sft",
+      "gate_a_model_evaluation",
+      "single_dagger_correction",
+      "gate_b_10_step_rl",
       "full_static_skill_rl",
       "new_dca0",
       "dca_vda_coevolution",
@@ -27,12 +30,21 @@
     "old_three_round_data": "failure_analysis_only_not_training"
   },
   "teacher": {
-    "type": "public_state_robust_max_min",
+    "type": "finite_counterfactual_public_state_robust_teacher",
     "advantage_delta": 0.05,
     "hidden_worlds_minimum": 2,
-    "horizon": [1, 3],
-    "beam_width": 4,
+    "common_horizon": 3,
+    "beam_width": 20,
     "max_public_candidates": 96,
+    "shortlist_quotas": {
+      "observe": 1,
+      "passive_verification": 3,
+      "active_probe": 4,
+      "trust": 3,
+      "memory": 3,
+      "mitigation": 6
+    },
+    "core_rank_correlation_min_exclusive": 0.5,
     "hidden_state_usage": "offline_utility_only",
     "model_input_hidden_state": false,
     "model_target_hidden_state": false
@@ -45,10 +57,20 @@
     "epochs": 1,
     "lora_rank": 16,
     "lora_alpha": 32,
+    "lora_target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
     "learning_rate": 1e-5,
     "effective_batch_size": 64,
     "warmup_ratio": 0.03,
-    "weight_decay": 0.01
+    "weight_decay": 0.01,
+    "unique_prompt_target_ratio_min": 0.95
   },
   "gate_a": {
     "evaluation": {

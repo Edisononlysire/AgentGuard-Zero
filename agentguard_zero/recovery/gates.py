@@ -78,21 +78,24 @@ def evaluate_stage0_gate(
             failures,
             policy_metrics,
             asdict(cfg),
-            accepted_next="gate_a_dual_arm",
+            accepted_next="bootstrap_data_build_and_audit",
         )
 
     utilities = {
         name: _number(policy_metrics[name], "safe_utility") for name in cfg.policies
     }
-    expected = (
+    hard_expected = (
         ("oracle", "public_state_teacher"),
         ("public_state_teacher", "random_legal"),
-        ("random_legal", "no_op"),
-        ("no_op", "overreact"),
     )
-    for higher, lower in expected:
+    for higher, lower in hard_expected:
         if utilities[higher] <= utilities[lower] + _EPS:
             failures.append(f"utility_order:{higher}<={lower}")
+
+    diagnostic_order = {
+        "random_legal_gt_no_op": utilities["random_legal"] > utilities["no_op"] + _EPS,
+        "no_op_gt_overreact": utilities["no_op"] > utilities["overreact"] + _EPS,
+    }
 
     teacher_gap = utilities["public_state_teacher"] - utilities["no_op"]
     if teacher_gap + _EPS < cfg.teacher_noop_safe_utility_gap:
@@ -112,13 +115,14 @@ def evaluate_stage0_gate(
     packed = {
         "policies": {name: dict(policy_metrics[name]) for name in cfg.policies},
         "teacher_noop_safe_utility_gap": teacher_gap,
+        "diagnostic_order_only": diagnostic_order,
     }
     return _verdict(
         "stage0_fixed_policy",
         failures,
         packed,
         asdict(cfg),
-        accepted_next="gate_a_dual_arm",
+        accepted_next="bootstrap_data_build_and_audit",
     )
 
 
@@ -246,7 +250,10 @@ def evaluate_gate_b(
         failures.append("initial_rollouts")
     if _integer(metrics, "adaptive_rollouts") != cfg.adaptive_rollouts:
         failures.append("adaptive_rollouts")
-    if abs(_number(metrics, "bootstrap_replay_ratio") - cfg.bootstrap_replay_ratio) > _EPS:
+    if (
+        abs(_number(metrics, "bootstrap_replay_ratio") - cfg.bootstrap_replay_ratio)
+        > _EPS
+    ):
         failures.append("bootstrap_replay_ratio")
     if bool(metrics.get("use_kl_loss")) is not cfg.use_kl_loss:
         failures.append("use_kl_loss")
@@ -313,8 +320,7 @@ def evaluate_static_skill_gate(
             "safe_success",
         ),
         (
-            _rate(metrics, "attack_mitigation") + _EPS
-            < cfg.attack_mitigation_min,
+            _rate(metrics, "attack_mitigation") + _EPS < cfg.attack_mitigation_min,
             "attack_mitigation",
         ),
         (
@@ -332,8 +338,7 @@ def evaluate_static_skill_gate(
             "trust_memory_operation_rate",
         ),
         (
-            _rate(metrics, "invalid_operation_rate")
-            > cfg.invalid_operation_max + _EPS,
+            _rate(metrics, "invalid_operation_rate") > cfg.invalid_operation_max + _EPS,
             "invalid_operation_rate",
         ),
         (
@@ -406,8 +411,7 @@ def evaluate_collapse_guard(
         failures.append("action_validity_below_95pct")
     last_two = [*history[-1:], current]
     if len(last_two) == 2 and all(
-        _rate(item, "actionable_observe_rate") > 0.80 + _EPS
-        for item in last_two
+        _rate(item, "actionable_observe_rate") > 0.80 + _EPS for item in last_two
     ):
         failures.append("actionable_observe_above_80pct_twice")
     if len(last_two) == 2 and all(

@@ -26,6 +26,32 @@ from agentguard_zero.recovery.public_teacher import (
 )
 
 
+def load_accepted_stage0(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    verdict = payload.get("verdict", {}) if isinstance(payload, dict) else {}
+    if payload.get("kind") != "recovery_stage0_audit":
+        raise RuntimeError("Stage-0 parent has the wrong artifact kind")
+    if payload.get("protocol_version") != RECOVERY_PROTOCOL_VERSION:
+        raise RuntimeError("Stage-0 parent has the wrong recovery protocol")
+    if payload.get("accepted") is not True or payload.get("status") != "accepted":
+        raise RuntimeError("Stage-0 parent is not an accepted artifact")
+    if (
+        verdict.get("gate") != "stage0_fixed_policy"
+        or verdict.get("accepted") is not True
+    ):
+        raise RuntimeError("Stage-0 parent did not pass")
+    if verdict.get("next_stage") != "bootstrap_data_build_and_audit":
+        raise RuntimeError("Stage-0 parent does not unlock Bootstrap data build")
+    if payload.get("next_stage") != verdict.get("next_stage"):
+        raise RuntimeError("Stage-0 parent next-stage fields disagree")
+    if (
+        int(payload.get("model_calls", -1)) != 0
+        or int(payload.get("parameter_updates", -1)) != 0
+    ):
+        raise RuntimeError("Stage-0 parent is not model-free")
+    return payload
+
+
 def _scenario_from_row(row: dict[str, Any]) -> dict[str, Any]:
     for key in ("scenario", "scenario_json"):
         value = row.get(key)
@@ -65,11 +91,7 @@ def load_scenarios(path: Path) -> list[dict[str, Any]]:
         if isinstance(payload, list):
             rows = payload
         elif isinstance(payload.get("groups"), list):
-            rows = [
-                scenario
-                for group in payload["groups"]
-                for scenario in group
-            ]
+            rows = [scenario for group in payload["groups"] for scenario in group]
         else:
             rows = payload.get("scenarios", [])
     return [_scenario_from_row(dict(row)) for row in rows]
@@ -101,6 +123,7 @@ def _sha256(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenarios", type=Path, required=True)
+    parser.add_argument("--stage0-audit", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-scenarios", type=int, default=400)
     parser.add_argument("--min-records", type=int, default=2_000)
@@ -109,6 +132,10 @@ def main() -> int:
 
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite {args.output_dir}")
+    stage0_parent = load_accepted_stage0(args.stage0_audit)
+    source_sha256 = _sha256(args.scenarios)
+    if source_sha256 == stage0_parent.get("scenario_source_sha256"):
+        raise RuntimeError("Bootstrap scenarios must be disjoint from Stage 0")
     scenarios = load_scenarios(args.scenarios)
     if len(scenarios) != args.expected_scenarios:
         raise ValueError(
@@ -127,19 +154,55 @@ def main() -> int:
         max_records=args.max_records,
     )
     record_count_ok = args.min_records <= len(result.train_records) <= args.max_records
+    unique_ratio_ok = (
+        float(result.manifest.get("unique_prompt_target_ratio", 0.0)) + 1.0e-12
+        >= config.bootstrap_sft.unique_prompt_target_ratio_min
+    )
+    rank_state_count = int(
+        result.manifest.get("teacher_core_rank_correlation_state_count", 0)
+    )
+    rank_correlation = result.manifest.get("teacher_core_rank_correlation_mean")
+    rank_gate_ok = (
+        rank_state_count >= 200
+        and isinstance(rank_correlation, (int, float))
+        and float(rank_correlation) > config.teacher.core_rank_correlation_min_exclusive
+    )
     result.manifest["record_count_gate"] = {
         "minimum": args.min_records,
         "maximum": args.max_records,
         "accepted": record_count_ok,
     }
+    result.manifest["unique_prompt_target_gate"] = {
+        "minimum": config.bootstrap_sft.unique_prompt_target_ratio_min,
+        "actual": result.manifest.get("unique_prompt_target_ratio"),
+        "accepted": unique_ratio_ok,
+    }
+    result.manifest["teacher_core_rank_correlation_gate"] = {
+        "minimum_states": 200,
+        "minimum_exclusive": config.teacher.core_rank_correlation_min_exclusive,
+        "actual_states": rank_state_count,
+        "actual": rank_correlation,
+        "accepted": rank_gate_ok,
+    }
     result.manifest["protocol_version"] = RECOVERY_PROTOCOL_VERSION
-    result.manifest["source_scenarios_sha256"] = _sha256(args.scenarios)
+    result.manifest["source_scenarios_sha256"] = source_sha256
+    result.manifest["stage0_parent"] = str(args.stage0_audit.resolve())
+    result.manifest["stage0_parent_sha256"] = _sha256(args.stage0_audit)
+    result.manifest["stage0_parent_snapshot"] = stage0_parent
     result.manifest["recovery_config"] = config.to_dict()
     result.manifest["accepted"] = bool(
-        result.manifest.get("accepted") and record_count_ok
+        result.manifest.get("accepted")
+        and record_count_ok
+        and unique_ratio_ok
+        and rank_gate_ok
     )
     result.manifest["status"] = (
         "accepted" if result.manifest["accepted"] else "rejected"
+    )
+    result.manifest["next_stage"] = (
+        "await_explicit_gate_a_sft_review"
+        if result.manifest["accepted"]
+        else "stop_and_repair_bootstrap_data"
     )
 
     args.output_dir.mkdir(parents=True)

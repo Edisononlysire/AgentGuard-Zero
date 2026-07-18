@@ -16,14 +16,20 @@ if str(ROOT) not in sys.path:
 
 from agentguard_zero.recovery.fixed_policies import run_stage0_suite
 from agentguard_zero.recovery.gates import evaluate_stage0_gate
-from agentguard_zero.recovery.protocol import RecoveryConfig
+from agentguard_zero.recovery.protocol import (
+    RECOVERY_PROTOCOL_VERSION,
+    RecoveryConfig,
+)
 from agentguard_zero.recovery.public_teacher import PublicStateRobustTeacher
+from agentguard_zero.recovery.utility import core_utility_manifest
 
 
 def _load_groups(path: Path) -> list[list[dict[str, Any]]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     groups = payload.get("groups")
-    if not isinstance(groups, list) or any(not isinstance(item, list) for item in groups):
+    if not isinstance(groups, list) or any(
+        not isinstance(item, list) for item in groups
+    ):
         raise ValueError("canonical input must contain public-world groups")
     return groups
 
@@ -54,12 +60,25 @@ def main() -> int:
     metrics = run_stage0_suite(groups, teacher=teacher, workers=args.workers)
     verdict = evaluate_stage0_gate(metrics, config)
     output = {
+        "schema_version": 1,
+        "kind": "recovery_stage0_audit",
+        "protocol_version": RECOVERY_PROTOCOL_VERSION,
+        "accepted": verdict.accepted,
+        "status": "accepted" if verdict.accepted else "rejected",
+        "next_stage": verdict.next_stage,
         "verdict": verdict.to_dict(),
-        "scenario_source_sha256": hashlib.sha256(args.scenarios.read_bytes()).hexdigest(),
+        "scenario_source_sha256": hashlib.sha256(
+            args.scenarios.read_bytes()
+        ).hexdigest(),
         "model_calls": 0,
         "parameter_updates": 0,
         "workers": args.workers,
         "hidden_state_usage": "fixed_policy_or_offline_teacher_utility_only",
+        "core_utility": core_utility_manifest(),
+        "teacher_method_claim": (
+            "finite_counterfactual_public_state_robust_teacher_with_"
+            "greedy_receding_horizon_continuation"
+        ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

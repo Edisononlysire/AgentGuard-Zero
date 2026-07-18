@@ -20,20 +20,22 @@ obtained models and compute.
 > lineage failed the action-support and output-contract audits. VDA2/VDA3 and
 > DCA2/DCA3 are excluded from formal results. The active protocol is now
 > [Action-Support Bootstrapped Co-evolution](docs/ACTION_SUPPORT_RECOVERY.md).
-> No recovery training may start until its fail-closed Stage-0 and Gate-A/B
-> checks pass. `Zero` means zero human-labelled optimal defence actions; the
-> cold-start targets are generated and verified by the simulator.
+> Only model-free Stage 0 and, after it passes, the repaired Bootstrap data
+> audit are currently approved to run. SFT, DAgger, Gate B, static-skill RL,
+> and new co-evolution remain review-locked. `Zero` means zero human-labelled
+> optimal defence actions; cold-start targets are generated and verified by
+> the simulator.
 
 ## Recovery Method At A Glance
 
 ```text
 200-scenario fixed-policy learnability gate
-  -> public-state robust teacher (no human action labels)
+  -> finite-counterfactual public-state robust teacher (no human labels)
   -> identical Bootstrap SFT pilot on Base and VDA1
   -> K=1 greedy Gate A and initialization selection
   -> one DAgger correction pass
   -> 10-step RL Gate B with adaptive G=2->4, replay, and KL
-  -> teacher review before static-skill RL or a fresh DCA0
+  -> separate approval before each model-training stage
 ```
 
 The historical process ran for three rounds independently on Qwen3.5-4B and Qwen3.5-9B.
@@ -110,7 +112,8 @@ python scripts/run_recovery_stage0.py \
   --workers 4
 ```
 
-Only after Stage 0 passes, build the public-only Bootstrap SFT records:
+Only after Stage 0 passes, build and audit the public-only Bootstrap records
+(this does not train a model):
 
 ```bash
 python scripts/generate_recovery_canonical.py \
@@ -120,6 +123,7 @@ python scripts/generate_recovery_canonical.py \
 
 python scripts/build_recovery_bootstrap.py \
   --scenarios /path/to/recovery_gate_a_train.json \
+  --stage0-audit /path/to/stage0_audit.json \
   --output-dir /path/to/recovery_bootstrap
 ```
 

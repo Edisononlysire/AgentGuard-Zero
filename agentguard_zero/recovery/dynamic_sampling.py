@@ -122,7 +122,11 @@ def evaluate_rollout_group(
     all_failed = all(not item.safe_success for item in samples)
     all_succeeded = all(item.safe_success for item in samples)
     zero_advantage = reward_std <= reward_epsilon
-    degenerate = zero_advantage or all_observe or all_failed or all_succeeded
+    # all_failed/all_succeeded are diagnostics, not exclusion criteria.  The
+    # recovery reward deliberately represents partial progress and cost, so a
+    # group can be useful even when every trajectory shares the same terminal
+    # success flag.
+    degenerate = zero_advantage or all_observe
 
     if len(samples) == initial_rollouts and degenerate:
         return GroupDecision(
@@ -159,8 +163,8 @@ def evaluate_rollout_group(
         sample_count=len(samples),
         reward_std=reward_std,
         all_observe=False,
-        all_failed=False,
-        all_succeeded=False,
+        all_failed=all_failed,
+        all_succeeded=all_succeeded,
         malformed_count=0,
         action="use",
         additional_rollouts=0,
