@@ -1349,6 +1349,19 @@ class TMCDV2ReleaseTests(unittest.TestCase):
             if name == "tmcd_v24_9b_full_node217.dsub.sh":
                 self.assertIn("AGZ_VDA_GENERATION_BATCH_SIZE=32", source)
 
+    def test_micro_pilot_job_uses_divisible_dca_hf_rollout_chunks(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root
+            / "scripts"
+            / "jobs"
+            / "tmcd_v2_pilot_4b_micro_1k500_node175.dsub.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("export AGZ_DCA_MAX_NUM_SEQS=5", source)
+        self.assertIn("batch_size=10", source)
+        self.assertIn("expected (2, 5)", source)
+        self.assertIn("20260719_tmcd_micro_1k500_retry1", source)
+
     def test_round_runner_invalidates_downstream_pool_and_can_stop_before_vda(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "scripts" / "run_dca_first_round.py").read_text(

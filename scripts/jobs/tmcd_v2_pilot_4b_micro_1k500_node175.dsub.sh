@@ -17,7 +17,7 @@ SEED=20260719
 OUTPUT_ROOT=${ROOT}/outputs/${SCOPE}/micro_1k500
 EVAL_ROOT=${OUTPUT_ROOT}/eval
 GATE_ROOT=${OUTPUT_ROOT}/gates
-SOURCE_HASHES=${ROOT}/outputs/source_snapshots/20260719_tmcd_micro_1k500_prelaunch/deployed_source.sha256
+SOURCE_HASHES=${ROOT}/outputs/source_snapshots/20260719_tmcd_micro_1k500_retry1/deployed_source.sha256
 
 if [[ "$(hostname)" != "${EXPECTED_NODE}" ]]; then
   echo "Refusing to run outside ${EXPECTED_NODE}: $(hostname)" >&2
@@ -49,6 +49,7 @@ export AGZ_VDA_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1
 export AGZ_DCA_PPO_MINI_BATCH_SIZE=20
 export AGZ_DCA_PPO_MICRO_BATCH_SIZE_PER_GPU=1
 export AGZ_DCA_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1
+export AGZ_DCA_MAX_NUM_SEQS=5
 export AGZ_ROLLOUT_TEMPERATURE=0.8
 export AGZ_ROLLOUT_TOP_P=0.95
 export AGZ_ROLLOUT_TOP_K=0
@@ -65,6 +66,22 @@ export AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS=2048
 export AGZ_VDA_FEEDBACK_MAX_NEW_TOKENS=320
 export AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE=2
 export AGZ_VDA_FEEDBACK_ATTN_IMPLEMENTATION=sdpa
+
+python -s - <<'PY'
+from verl.workers.rollout.hf_rollout import _rollout_chunk_plan
+
+chunks, largest = _rollout_chunk_plan(
+    batch_size=10,
+    sequence_tokens=3072,
+    max_num_seqs=5,
+    max_batch_tokens=None,
+)
+if (chunks, largest) != (2, 5):
+    raise SystemExit(
+        f"DCA rollout partition gate failed: expected (2, 5), got {(chunks, largest)}"
+    )
+print("DCA rollout partition gate: 10 prompts -> 2 chunks x 5 = PASS")
+PY
 
 common_round_args=(
   --root "${ROOT}"
