@@ -24,6 +24,7 @@ from agentguard_zero.recovery.public_teacher import (
     PublicStateRobustTeacher,
     public_state_digest,
 )
+from agentguard_zero.recovery.source_counterfactuals import counterfactual_groups
 
 
 def load_accepted_stage0(path: Path) -> dict[str, Any]:
@@ -123,24 +124,43 @@ def _sha256(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenarios", type=Path, required=True)
-    parser.add_argument("--stage0-audit", type=Path, required=True)
+    parser.add_argument("--stage0-audit", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-scenarios", type=int, default=400)
     parser.add_argument("--min-records", type=int, default=2_000)
     parser.add_argument("--max-records", type=int, default=3_000)
+    parser.add_argument("--derive-counterfactual-worlds", action="store_true")
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--defer-global-distribution-gates", action="store_true")
     args = parser.parse_args()
 
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite {args.output_dir}")
-    stage0_parent = load_accepted_stage0(args.stage0_audit)
+    if not 0 <= args.shard_index < args.shard_count:
+        raise ValueError("invalid shard index/count")
+    stage0_parent = (
+        load_accepted_stage0(args.stage0_audit)
+        if args.stage0_audit is not None
+        else None
+    )
     source_sha256 = _sha256(args.scenarios)
-    if source_sha256 == stage0_parent.get("scenario_source_sha256"):
+    if (
+        stage0_parent is not None
+        and source_sha256 == stage0_parent.get("scenario_source_sha256")
+    ):
         raise RuntimeError("Bootstrap scenarios must be disjoint from Stage 0")
     scenarios = load_scenarios(args.scenarios)
     if len(scenarios) != args.expected_scenarios:
         raise ValueError(
             f"expected {args.expected_scenarios} scenarios, got {len(scenarios)}"
         )
+    all_groups = (
+        counterfactual_groups(scenarios)
+        if args.derive_counterfactual_worlds
+        else group_public_worlds(scenarios)
+    )
+    selected_groups = all_groups[args.shard_index :: args.shard_count]
     config = RecoveryConfig()
     teacher = PublicStateRobustTeacher(
         advantage_delta=config.teacher.advantage_delta,
@@ -149,7 +169,7 @@ def main() -> int:
         max_candidates=config.teacher.max_candidates,
     )
     result = build_bootstrap_records(
-        group_public_worlds(scenarios),
+        selected_groups,
         teacher=teacher,
         max_records=args.max_records,
     )
@@ -186,15 +206,47 @@ def main() -> int:
     }
     result.manifest["protocol_version"] = RECOVERY_PROTOCOL_VERSION
     result.manifest["source_scenarios_sha256"] = source_sha256
-    result.manifest["stage0_parent"] = str(args.stage0_audit.resolve())
-    result.manifest["stage0_parent_sha256"] = _sha256(args.stage0_audit)
+    result.manifest["source_scenario_count"] = len(selected_groups)
+    result.manifest["audit_world_count"] = sum(
+        len(group) for group in selected_groups
+    )
+    result.manifest["counterfactual_worlds_training_visible"] = False
+    result.manifest["derived_counterfactual_worlds"] = bool(
+        args.derive_counterfactual_worlds
+    )
+    result.manifest["shard_index"] = args.shard_index
+    result.manifest["shard_count"] = args.shard_count
+    result.manifest["stage0_parent"] = (
+        str(args.stage0_audit.resolve()) if args.stage0_audit else None
+    )
+    result.manifest["stage0_parent_sha256"] = (
+        _sha256(args.stage0_audit) if args.stage0_audit else None
+    )
     result.manifest["stage0_parent_snapshot"] = stage0_parent
+    result.manifest["execution_authorization"] = (
+        "accepted_stage0" if stage0_parent is not None else "direct_user_fixed500_vda"
+    )
     result.manifest["recovery_config"] = config.to_dict()
+    if args.defer_global_distribution_gates:
+        deferred_prefixes = (
+            "single_action_category_above_40pct",
+            "missing_action_support:",
+        )
+        remaining_failures = [
+            failure
+            for failure in result.manifest.get("failures", [])
+            if not failure.startswith(deferred_prefixes)
+        ]
+        result.manifest["shard_deferred_distribution_failures"] = [
+            failure
+            for failure in result.manifest.get("failures", [])
+            if failure.startswith(deferred_prefixes)
+        ]
+        base_accepted = not remaining_failures
+    else:
+        base_accepted = bool(result.manifest.get("accepted"))
     result.manifest["accepted"] = bool(
-        result.manifest.get("accepted")
-        and record_count_ok
-        and unique_ratio_ok
-        and rank_gate_ok
+        base_accepted and record_count_ok and unique_ratio_ok and rank_gate_ok
     )
     result.manifest["status"] = (
         "accepted" if result.manifest["accepted"] else "rejected"

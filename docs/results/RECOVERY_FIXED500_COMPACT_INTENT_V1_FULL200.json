@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-19",
+  "status": "completed_pilot_evaluation",
+  "scope": "fixed500_round1_recovery_pilot",
+  "selected_variant": "compact_intent_sft_v1",
+  "training_source": {
+    "scenario_count": 500,
+    "sha256": "16b7b2e8e77c8186b71d118995d60a75b1d46c63487c71b9976387a90dc56487"
+  },
+  "evaluation_source": {
+    "scenario_count": 200,
+    "task_counts": {
+      "T1": 50,
+      "T2": 50,
+      "T3": 50,
+      "T4": 50
+    },
+    "sha256": "9e48a6c39d401d089c9f6e5c90980fbdc7b4dc325c83a9a55f8f050e6e4dc2a2"
+  },
+  "evaluation_protocol": {
+    "candidate_count": 1,
+    "decoding": "greedy",
+    "thinking_mode": "disabled",
+    "output_format": "compact_public_action_intent_v1",
+    "ecrg_enabled": false,
+    "dca_enabled": false,
+    "result_selection": false
+  },
+  "three_way_quick8": {
+    "compact_intent_sft_v1": {
+      "job_id": 344504,
+      "adapter_sha256": "34e940ec13f52f311765a4a9de76742ba78ff8400d5df46961f8cbd703414192",
+      "action_validity": 1.0,
+      "attack_mitigation": 0.625,
+      "overresponse": 0.625,
+      "business_cost": 1.735,
+      "safe_utility": -0.1527177083333333
+    },
+    "compact_intent_balanced_sft_v2": {
+      "job_id": 344505,
+      "adapter_sha256": "eac0b27d0ccc487b386f8a7cce2ab1130695fae1a03b7c98c431d62a04eb1f19",
+      "action_validity": 0.7021276595744681,
+      "attack_mitigation": 0.25,
+      "overresponse": 0.5,
+      "business_cost": 1.286125,
+      "safe_utility": -0.8152916666666666
+    },
+    "compact_intent_bidirectional_dpo_v3": {
+      "job_id": 344508,
+      "adapter_sha256": "5f816946808d9a1ae9c74f58b9e6b26cb39de7a2e22b97816cdf8008fdb32181",
+      "action_validity": 1.0,
+      "attack_mitigation": 0.0,
+      "overresponse": 0.0,
+      "business_cost": 0.0,
+      "safe_utility": -1.0613095238095238
+    }
+  },
+  "full200": {
+    "job_id": 344526,
+    "adapter_sha256": "34e940ec13f52f311765a4a9de76742ba78ff8400d5df46961f8cbd703414192",
+    "metrics_sha256": "199f0403c0d48b80bb259d86cd9b27df7ca023841285ed03976f1be7cb03bbe1",
+    "overall": {
+      "scenario_count": 200,
+      "decision_count": 1064,
+      "action_validity": 0.9445488721804511,
+      "attack_mitigation": 0.485,
+      "overresponse": 0.47,
+      "business_cost": 1.7645399999999998,
+      "safe_utility": -0.38206555164565825,
+      "active_probe_rate": 0.09586466165413533,
+      "mitigation_action_rate": 0.8411654135338346,
+      "poison_success": 0.0,
+      "betrayal_detection": 0.0,
+      "probe_yield": 0.0
+    },
+    "task_metrics": {
+      "T1": {
+        "scenario_count": 50,
+        "action_validity": 0.9688715953307393,
+        "attack_mitigation": 0.72,
+        "overresponse": 0.5,
+        "business_cost": 2.12206,
+        "safe_utility": 0.09764386484593837
+      },
+      "T2": {
+        "scenario_count": 50,
+        "action_validity": 1.0,
+        "attack_mitigation": 0.76,
+        "overresponse": 0.52,
+        "business_cost": 2.1785399999999995,
+        "safe_utility": 0.17230561904761907
+      },
+      "T3": {
+        "scenario_count": 50,
+        "action_validity": 0.9446494464944649,
+        "attack_mitigation": 0.46,
+        "overresponse": 0.48,
+        "business_cost": 2.21942,
+        "safe_utility": -0.4316052619047619
+      },
+      "T4": {
+        "scenario_count": 50,
+        "action_validity": 0.883495145631068,
+        "attack_mitigation": 0.0,
+        "overresponse": 0.38,
+        "business_cost": 0.53814,
+        "safe_utility": -1.3666064285714288
+      }
+    }
+  },
+  "all_observe_baseline_full200": {
+    "attack_mitigation": 0.0,
+    "overresponse": 0.0,
+    "business_cost": 0.0,
+    "safe_utility": -1.0578012254901974
+  },
+  "verdict": {
+    "selected": "compact_intent_sft_v1",
+    "positive": "The compact VDA learned executable defensive behavior and improved safe utility over all-Observe on the identical 200 scenarios.",
+    "limitations": "Overresponse remains high, T4 mitigation is zero, and this pilot is not a substitute for the sealed TMCD-Test evaluation."
+  }
+}
