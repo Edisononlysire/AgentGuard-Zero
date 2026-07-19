@@ -1,5 +1,23 @@
 # Training And Test Log
 
+## Revalidation
+
+Revalidated on 2026-07-19 with the project's `agent0-gpu` Python 3.12.13
+environment:
+
+```text
+/home/share/huadjyin/home/s_qinhua2/01software/miniconda3/envs/agent0-gpu/bin/python -m unittest discover -s tests -q
+----------------------------------------------------------------------
+Ran 170 tests in 5.097s
+
+OK
+```
+
+Raw four-rank training logs for rounds 1-3 are stored under
+`outputs/candidate_min3/pilot3/launcher_logs/`. Raw fixed-evaluation shard logs
+are stored beside each shard JSON under
+`evaluations/candidate_coevolution_min3/pilot3/`.
+
 ## Completed Checks
 
 - Candidate/compiler, DCA reward, and recovery contract suite: 16 passed.

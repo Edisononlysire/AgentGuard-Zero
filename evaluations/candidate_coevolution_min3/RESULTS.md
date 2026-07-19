@@ -44,3 +44,7 @@ training scale and curriculum admission policy. Before another formal run:
 3. Require fresh mean-regret reduction in addition to argmax/top-1 gain.
 4. Pass fixed 200-scenario, three-seed Gate A before enabling LLM-DCA updates or
    candidate-level RL.
+
+The evidence-backed root-cause analysis and ordered remediation protocol are in
+`IMPROVEMENT_ANALYSIS.md`. Formal-paper metric and experiment gaps are tracked
+separately in `EVALUATION_REQUIREMENTS_GAP.md`.
