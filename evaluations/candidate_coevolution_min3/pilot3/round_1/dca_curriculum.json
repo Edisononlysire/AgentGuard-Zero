@@ -1,0 +1,52 @@
+{
+  "created_at": "2026-07-19T11:36:14.047933Z",
+  "kind": "candidate_dca_curriculum_policy",
+  "round_index": 1,
+  "sampling_weights": {
+    "T1": 0.1322919104635505,
+    "T2": 0.12129387026473157,
+    "T3": 0.609643551310721,
+    "T4": 0.13677066796099685
+  },
+  "schema_version": 1,
+  "seed": 20260720,
+  "skill_gap": {
+    "T1": {
+      "gap": 0.37712812500000004,
+      "normalized_regret": 0.004729166666666673,
+      "required_skill_rate": 0.5,
+      "safe_success": 0.0
+    },
+    "T2": {
+      "gap": 0.34675,
+      "normalized_regret": 0.015000000000000013,
+      "required_skill_rate": 0.6,
+      "safe_success": 0.0
+    },
+    "T3": {
+      "gap": 0.9118803571428571,
+      "normalized_regret": 0.8041785714285715,
+      "required_skill_rate": 0.0,
+      "safe_success": 0.0
+    },
+    "T4": {
+      "gap": 0.38878124999999997,
+      "normalized_regret": 0.030625000000000013,
+      "required_skill_rate": 0.5,
+      "safe_success": 0.0
+    }
+  },
+  "source_capability_admitted": true,
+  "source_evaluation_sha256": "e05b24546a5f2a37c6a3156f0ed47305f9ca0e31b1ecd1c9894b01414c598c77",
+  "task_schedule": [
+    "T2",
+    "T4",
+    "T3",
+    "T4",
+    "T1",
+    "T3",
+    "T2",
+    "T3"
+  ],
+  "weakest_task": "T3"
+}

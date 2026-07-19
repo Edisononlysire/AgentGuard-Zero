@@ -1,0 +1,50 @@
+{
+  "completed": true,
+  "created_at": "2026-07-19T12:04:35.466626Z",
+  "diagnostic_override_gates": true,
+  "final_active_manifest": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/warmstart_a3_effective_min20/manifest.json",
+  "initial_gate_a_accepted": false,
+  "kind": "candidate_coevolution_min3_pilot",
+  "round_count": 3,
+  "rounds": [
+    {
+      "accepted": false,
+      "active_manifest_after_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/warmstart_a3_effective_min20/manifest.json",
+      "candidate_manifest": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/pilot3/ranker_round_1/manifest.json",
+      "curriculum": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_1/dca_curriculum.json",
+      "dca_feedback_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_1/dca_feedback_gate.json",
+      "rollback_required": true,
+      "round_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_1/round_gate.json",
+      "round_index": 1,
+      "source_manifest": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/warmstart_a3_effective_min20/manifest.json",
+      "training_summary": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_1/training_summary.json"
+    },
+    {
+      "accepted": false,
+      "active_manifest_after_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/warmstart_a3_effective_min20/manifest.json",
+      "candidate_manifest": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/pilot3/ranker_round_2/manifest.json",
+      "curriculum": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_2/dca_curriculum.json",
+      "dca_feedback_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_2/dca_feedback_gate.json",
+      "rollback_required": true,
+      "round_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_2/round_gate.json",
+      "round_index": 2,
+      "source_manifest": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/warmstart_a3_effective_min20/manifest.json",
+      "training_summary": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_2/training_summary.json"
+    },
+    {
+      "accepted": false,
+      "active_manifest_after_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/warmstart_a3_effective_min20/manifest.json",
+      "candidate_manifest": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/pilot3/ranker_round_3/manifest.json",
+      "curriculum": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_3/dca_curriculum.json",
+      "dca_feedback_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_3/dca_feedback_gate.json",
+      "rollback_required": true,
+      "round_gate": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_3/round_gate.json",
+      "round_index": 3,
+      "source_manifest": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/outputs/candidate_min3/warmstart_a3_effective_min20/manifest.json",
+      "training_summary": "/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero-candidate-coevolution-min3/evaluations/candidate_coevolution_min3/pilot3/round_3/training_summary.json"
+    }
+  ],
+  "rounds_accepted": 0,
+  "schema_version": 1,
+  "warmstart_manifest_sha256": "5e00b4c26e4f7f52a8bb0705b7c1243e1b4a75c3c71660537349a94264317a7d"
+}

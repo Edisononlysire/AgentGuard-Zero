@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+
+source /opt/batch/cli/envs/profile.env
+cd /home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero
+
+export AGZ_SELECT_LIMIT=1
+export AGZ_SELECT_OFFSET=23
+export AGZ_SELECT_K=4
+export AGZ_SELECTOR_MODE=mitigation_v3
+export AGZ_SELECT_MAX_NEW_TOKENS=768
+export AGZ_SELECT_MAX_TURNS=3
+export AGZ_SELECT_RUN_NAME=agentguard_api_select_v3_debug_offset23_manual
+
+dsub -s scripts/eval_level1_api_select_dsub.sh

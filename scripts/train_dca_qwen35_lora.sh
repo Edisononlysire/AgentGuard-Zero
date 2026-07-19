@@ -10,6 +10,8 @@ export AGZ_DISABLE_THINKING=${AGZ_DISABLE_THINKING:-1}
 MODEL_PATH=${AGZ_MODEL_PATH:?AGZ_MODEL_PATH is required}
 VDA_MODEL_PATH=${AGZ_VDA_MODEL_PATH:-${MODEL_PATH}}
 VDA_ADAPTER_PATH=${AGZ_VDA_ADAPTER_PATH:-}
+VDA_POLICY_BACKEND=${AGZ_VDA_POLICY_BACKEND:-free_json}
+VDA_RANKER_MANIFEST=${AGZ_VDA_RANKER_MANIFEST:-}
 TRAIN_FILE=${AGZ_TRAIN_FILE:?AGZ_TRAIN_FILE is required}
 VAL_FILE=${AGZ_VAL_FILE:-${TRAIN_FILE}}
 DCA_FEEDBACK_LOG=${AGZ_DCA_FEEDBACK_LOG:?AGZ_DCA_FEEDBACK_LOG is required}
@@ -89,6 +91,23 @@ DCA_GPU_MEMORY_UTILIZATION=${AGZ_DCA_GPU_MEMORY_UTILIZATION:-0.35}
 
 mkdir -p "$(dirname "${DCA_FEEDBACK_LOG}")" "${CHECKPOINT_DIR}" "${ROOT}/logs"
 
+case "${VDA_POLICY_BACKEND}" in
+  free_json)
+    DCA_REWARD_PATH="${ROOT}/curriculum/reward_function/dca_online_reward.py"
+    ;;
+  candidate_ranker)
+    if [[ -z "${VDA_RANKER_MANIFEST}" || ! -f "${VDA_RANKER_MANIFEST}" ]]; then
+      echo "candidate_ranker backend requires AGZ_VDA_RANKER_MANIFEST" >&2
+      exit 64
+    fi
+    DCA_REWARD_PATH="${ROOT}/curriculum/reward_function/candidate_dca_online_reward.py"
+    ;;
+  *)
+    echo "Unsupported AGZ_VDA_POLICY_BACKEND=${VDA_POLICY_BACKEND}" >&2
+    exit 64
+    ;;
+esac
+
 ADAPTER_ARGS=()
 if [[ -n "${VDA_ADAPTER_PATH}" && "${VDA_ADAPTER_PATH}" != "null" ]]; then
   ADAPTER_ARGS=(--adapter-path "${VDA_ADAPTER_PATH}")
@@ -110,24 +129,40 @@ for index in "${!GPU_IDS[@]}"; do
   model_cache_key=$(basename "${VDA_MODEL_PATH}" | tr -c 'A-Za-z0-9._-' '_')
   service_cache="${AGZ_TRITON_CACHE_ROOT}/vda_feedback/${model_cache_key}/rank_${index}"
   mkdir -p "${service_cache}"
-  TRITON_CACHE_DIR="${service_cache}" CUDA_VISIBLE_DEVICES="${gpu_id}" \
-    python -s "${ROOT}/scripts/vda_feedback_server.py" \
-    --host "${HOST}" \
-    --port "${port}" \
-    --model-path "${VDA_MODEL_PATH}" \
-    "${ADAPTER_ARGS[@]}" \
-    "${VDA_LOAD_ARGS[@]}" \
-    --seed "$((SEED + index))" \
-    --max-turns "${AGZ_VDA_FEEDBACK_MAX_TURNS:-5}" \
-    --max-input-tokens "${AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS:-2048}" \
-    --max-new-tokens "${AGZ_VDA_FEEDBACK_MAX_NEW_TOKENS:-384}" \
-    --continuation-prompt-mode "${AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE:-snapshot}" \
-    --history-window "${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-6}" \
-    --invalid-action-patience "${AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE:-0}" \
-    --attn-implementation "${VDA_FEEDBACK_ATTN_IMPLEMENTATION}" \
-    --top-p "${AGZ_VDA_FEEDBACK_TOP_P:-1.0}" \
-    --top-k "${AGZ_VDA_FEEDBACK_TOP_K:-0}" \
-    > "${ROOT}/logs/${RUN_NAME}_vda_feedback_${index}.log" 2>&1 &
+  if [[ "${VDA_POLICY_BACKEND}" == "candidate_ranker" ]]; then
+    TRITON_CACHE_DIR="${service_cache}" CUDA_VISIBLE_DEVICES="${gpu_id}" \
+      python -s "${ROOT}/scripts/candidate_vda_feedback_server.py" \
+      --host "${HOST}" \
+      --port "${port}" \
+      --model-path "${VDA_MODEL_PATH}" \
+      --ranker-manifest "${VDA_RANKER_MANIFEST}" \
+      --device cuda:0 \
+      --rollouts 4 \
+      --temperature "${AGZ_VDA_FEEDBACK_TEMPERATURE:-0.8}" \
+      --seed "$((SEED + index))" \
+      --max-length "${AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS:-2048}" \
+      --score-batch-size "${AGZ_CANDIDATE_SCORE_BATCH_SIZE:-4}" \
+      > "${ROOT}/logs/${RUN_NAME}_vda_feedback_${index}.log" 2>&1 &
+  else
+    TRITON_CACHE_DIR="${service_cache}" CUDA_VISIBLE_DEVICES="${gpu_id}" \
+      python -s "${ROOT}/scripts/vda_feedback_server.py" \
+      --host "${HOST}" \
+      --port "${port}" \
+      --model-path "${VDA_MODEL_PATH}" \
+      "${ADAPTER_ARGS[@]}" \
+      "${VDA_LOAD_ARGS[@]}" \
+      --seed "$((SEED + index))" \
+      --max-turns "${AGZ_VDA_FEEDBACK_MAX_TURNS:-5}" \
+      --max-input-tokens "${AGZ_VDA_FEEDBACK_MAX_INPUT_TOKENS:-2048}" \
+      --max-new-tokens "${AGZ_VDA_FEEDBACK_MAX_NEW_TOKENS:-384}" \
+      --continuation-prompt-mode "${AGZ_VDA_FEEDBACK_CONTINUATION_PROMPT_MODE:-snapshot}" \
+      --history-window "${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-6}" \
+      --invalid-action-patience "${AGZ_VDA_FEEDBACK_INVALID_ACTION_PATIENCE:-0}" \
+      --attn-implementation "${VDA_FEEDBACK_ATTN_IMPLEMENTATION}" \
+      --top-p "${AGZ_VDA_FEEDBACK_TOP_P:-1.0}" \
+      --top-k "${AGZ_VDA_FEEDBACK_TOP_K:-0}" \
+      > "${ROOT}/logs/${RUN_NAME}_vda_feedback_${index}.log" 2>&1 &
+  fi
   VDA_PIDS+=("$!")
   VDA_URLS+=("${url}")
 done
@@ -178,6 +213,7 @@ export AGZ_VDA_FEEDBACK_TIMEOUT=${AGZ_VDA_FEEDBACK_TIMEOUT:-1800}
 
 echo "DCA GPU layout=${DCA_GPU_LAYOUT} GPUs=${DCA_GPUS}; VDA feedback GPUs=${DCA_GPUS}"
 echo "DCA feedback services=${AGZ_VDA_FEEDBACK_URLS}"
+echo "DCA VDA policy backend=${VDA_POLICY_BACKEND}"
 echo "DCA feedback attention=${VDA_FEEDBACK_ATTN_IMPLEMENTATION}"
 echo "DCA parent VDA adapter=${VDA_ADAPTER_PATH:-base}"
 echo "DCA feedback history_window=${AGZ_VDA_FEEDBACK_HISTORY_WINDOW:-6}"
@@ -209,7 +245,7 @@ PYTHONUNBUFFERED=1 python -s -m verl_tool.trainer.main_ppo \
     ray_init.num_cpus="${RAY_NUM_CPUS}" \
     reward_model.reward_manager=batch \
     reward_model.launch_reward_fn_async=False \
-    custom_reward_function.path="${ROOT}/curriculum/reward_function/dca_online_reward.py" \
+    custom_reward_function.path="${DCA_REWARD_PATH}" \
     custom_reward_function.name=compute_score \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing="${ENABLE_GRADIENT_CHECKPOINTING}" \

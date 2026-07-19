@@ -1,0 +1,55 @@
+{
+  "protocol_version": "candidate-coevolution-min3-v1",
+  "seed": 20260719,
+  "backbone": "qwen3.5-4b",
+  "candidate": {
+    "minimum": 8,
+    "maximum": 24,
+    "teacher_temperature": 0.1,
+    "near_optimal_delta": 0.02
+  },
+  "warm_start": {
+    "scenario_count": 128,
+    "candidate_state_cap": 512,
+    "family_epochs": 1.0,
+    "rank_epochs": 1.0,
+    "preference_epochs": 1.0,
+    "family_learning_rate": 1e-5,
+    "rank_learning_rate": 5e-6,
+    "preference_learning_rate": 2e-6
+  },
+  "evaluation": {
+    "fixed_scenario_count": 32,
+    "fresh_scenario_count": 32,
+    "decoding": "candidate_argmax",
+    "seed": 20260729
+  },
+  "round": {
+    "count": 3,
+    "dca_feedback_candidates": 64,
+    "vda_rollouts_per_scenario": 4,
+    "dca_batch_size": 8,
+    "dca_rollout_n": 2,
+    "dca_steps": 4,
+    "fresh_generation_candidates": 256,
+    "vda_candidate_sets": 128,
+    "trajectory_rl_steps": 10,
+    "bootstrap_replay_ratio": 0.2,
+    "kl_coef": 0.02
+  },
+  "mix": {
+    "fresh_frontier": 0.45,
+    "canonical_replay": 0.2,
+    "past_round_replay": 0.15,
+    "probe_chain_states": 0.1,
+    "hard_state_replay": 0.1
+  },
+  "dca_reward": {
+    "frontier_weight": 0.35,
+    "novelty_weight": 0.2,
+    "skill_gap_weight": 0.2,
+    "vda_regret_weight": 0.25,
+    "invalid_penalty": 1.0,
+    "unreachable_penalty": 1.0
+  }
+}

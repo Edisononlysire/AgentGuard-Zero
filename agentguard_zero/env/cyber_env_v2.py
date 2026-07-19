@@ -290,6 +290,20 @@ class CyberDefenseEnvV2:
             ),
             last_tool_result=self.last_tool_result,
             public_probe_state=(self.public_probe_state if self.state_layer_enabled else []),
+            response_requirements={
+                "memory_use_required_for_mitigation": bool(
+                    constraints.get("require_memory_use_for_mitigation", False)
+                ),
+                "active_probe_required_for_mitigation": bool(
+                    constraints.get("require_active_probe_for_mitigation", False)
+                ),
+                "trust_update_required_for_mitigation": bool(
+                    constraints.get("require_trust_update_for_mitigation", False)
+                ),
+                "impact_probe_required_for_mitigation": bool(
+                    constraints.get("require_impact_probe_for_mitigation", False)
+                ),
+            },
         )
         assert_public(observation)
         self._observation_cache[self.t] = copy.deepcopy(observation)
@@ -531,6 +545,65 @@ class CyberDefenseEnvV2:
         action_authorized = authorization.allowed
         authorization_reason = authorization.reason
         proposed_action = str(proposed_response.get("action", "Observe"))
+        if (
+            proposed_action in MITIGATING_ACTIONS
+            and bool(
+                self.scenario.get("defense_constraints", {}).get(
+                    "require_memory_use_for_mitigation", False
+                )
+            )
+        ):
+            grounded_usage = [
+                row
+                for row in action_packet.get("memory_usage", []) or []
+                if isinstance(row, dict)
+                and str(row.get("memory_id", "")) in self._last_retrieved_ids
+                and str(row.get("used_for", "")) == "response"
+            ]
+            if not grounded_usage:
+                action_authorized = False
+                authorization_reason = "mitigation_requires_retrieved_memory_use"
+        if proposed_action in MITIGATING_ACTIONS and bool(
+            self.scenario.get("defense_constraints", {}).get(
+                "require_active_probe_for_mitigation", False
+            )
+        ):
+            if not (
+                bool((self.last_tool_result or {}).get("active_probe", False))
+                or any(
+                    bool((step.get("tool_result") or {}).get("active_probe", False))
+                    for step in self.history
+                )
+            ):
+                action_authorized = False
+                authorization_reason = "mitigation_requires_prior_active_probe"
+        if proposed_action in MITIGATING_ACTIONS and bool(
+            self.scenario.get("defense_constraints", {}).get(
+                "require_trust_update_for_mitigation", False
+            )
+        ):
+            if not any(
+                bool(item.get("committed", False))
+                for step in self.history
+                for item in step.get("trust_events", []) or []
+            ):
+                action_authorized = False
+                authorization_reason = "mitigation_requires_prior_trust_update"
+        if proposed_action in MITIGATING_ACTIONS and bool(
+            self.scenario.get("defense_constraints", {}).get(
+                "require_impact_probe_for_mitigation", False
+            )
+        ):
+            impact_tools = {"BusinessImpactEstimator", "ShadowActionProbe"}
+            if not (
+                str((self.last_tool_result or {}).get("tool", "")) in impact_tools
+                or any(
+                    str((step.get("tool_result") or {}).get("tool", "")) in impact_tools
+                    for step in self.history
+                )
+            ):
+                action_authorized = False
+                authorization_reason = "mitigation_requires_prior_impact_probe"
         if (
             proposed_action in ACTIVE_PROBE_RESPONSE_ACTIONS
             and not self.variant.active_probing

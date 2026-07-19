@@ -58,24 +58,63 @@ def _base_scenario(task_id: str, group_index: int) -> dict[str, Any]:
         event["spoofability"] = 0.60
         scenario["oracle"]["actionable_from"] = int(event["time"])
         scenario["oracle"]["first_actionable_event_id"] = event["event_id"]
+        scenario["defense_constraints"]["require_active_probe_for_mitigation"] = True
+        scenario["true_attack"]["initial_pressure"] = 0.40
     elif task_id == "T2":
         scenario["pair_id"] = f"pair-recovery-{group_index:04d}"
         scenario["trajectory_type"] = "betrayal"
+        scenario["defense_constraints"]["require_trust_update_for_mitigation"] = True
+        scenario["true_attack"]["initial_pressure"] = 0.40
         scenario["prefix_hash"] = public_prefix_hash(scenario)
     elif task_id == "T3":
         for key in ("pair_id", "prefix_hash", "divergence_time", "trajectory_type"):
             scenario.pop(key, None)
-        poison = copy.deepcopy(scenario["event_schedule"][2])
-        poison["event_id"] = f"event-{suffix}-poison"
-        poison["time"] = 1
-        poison["claim_semantics"]["predicate"] = "asset_risk_level"
-        poison["claim_semantics"]["object"] = "low"
-        poison["objective_hint"] = "persistence"
-        poison["truth_value"] = False
-        poison["is_fake"] = True
-        scenario["event_schedule"].insert(2, poison)
-        scenario["oracle"]["actionable_from"] = 1
-        scenario["oracle"]["first_actionable_event_id"] = poison["event_id"]
+        template = copy.deepcopy(scenario["event_schedule"][0])
+        source_a = str(scenario["event_schedule"][0]["source_id"])
+        source_b = str(scenario["event_schedule"][3]["source_id"])
+        schedule = []
+        specifications = (
+            (0, "profile-low", source_a, "asset_risk_level", "low", False),
+            (1, "profile-high", source_b, "asset_risk_level", "high", True),
+            (2, "profile-safe", source_a, "compromise_state", "safe", False),
+            (3, "history-dependent", source_b, "attack_objective", "exfiltration", True),
+            (4, "final-decision", source_b, "threat_state", "active", True),
+        )
+        for time, name, source, predicate, object_value, truth in specifications:
+            event = copy.deepcopy(template)
+            event["event_id"] = f"event-{suffix}-{name}"
+            event["time"] = time
+            event["source_id"] = source
+            event["source"] = source
+            event["entity_id"] = "database"
+            event["claim"] = f"database {predicate} is {object_value}"
+            event["claim_semantics"] = {
+                "entity_id": "database",
+                "predicate": predicate,
+                "object": object_value,
+                "scope": "cyber_defense",
+            }
+            event["objective_hint"] = (
+                object_value if object_value in OBJECTIVES else "exfiltration"
+            )
+            event["truth_value"] = truth
+            event["is_fake"] = not truth
+            event["spoofability"] = 0.75 if not truth else 0.20
+            schedule.append(event)
+        scenario["event_schedule"] = schedule
+        scenario["true_attack"]["phase_schedule"] = [
+            "initial_access",
+            "discovery",
+            "lateral_movement",
+            "collection",
+            "collection",
+            "exfiltration",
+        ]
+        scenario["defense_constraints"]["horizon"] = 7
+        scenario["defense_constraints"]["verification_budget"] = 6
+        scenario["defense_constraints"]["require_memory_use_for_mitigation"] = True
+        scenario["oracle"]["actionable_from"] = 0
+        scenario["oracle"]["first_actionable_event_id"] = schedule[0]["event_id"]
     else:
         for key in ("pair_id", "prefix_hash", "divergence_time", "trajectory_type"):
             scenario.pop(key, None)
@@ -86,26 +125,21 @@ def _base_scenario(task_id: str, group_index: int) -> dict[str, Any]:
         pressure["claim"] = "urgent isolation requested for critical database"
         scenario["oracle"]["actionable_from"] = int(pressure["time"])
         scenario["oracle"]["first_actionable_event_id"] = pressure["event_id"]
+        scenario["defense_constraints"]["require_impact_probe_for_mitigation"] = True
+        scenario["true_attack"]["initial_pressure"] = 0.40
     return scenario
 
 
-def _objective_counterpart(scenario: dict[str, Any]) -> dict[str, Any]:
+def _robust_hidden_counterpart(scenario: dict[str, Any]) -> dict[str, Any]:
     counterpart = copy.deepcopy(scenario)
-    current = str(counterpart["true_attack"]["objective"])
-    alternative = (
-        "sabotage"
-        if current != "sabotage"
-        else next(item for item in sorted(OBJECTIVES) if item != current)
-    )
     counterpart["scenario_id"] = str(counterpart["scenario_id"]).rsplit("-", 1)[0] + "-B"
-    counterpart["true_attack"]["objective"] = alternative
-    counterpart["oracle"]["true_objective"] = alternative
-    counterpart["oracle"]["success_condition"] = f"prevent_{alternative}"
-    for event in counterpart.get("event_schedule", []):
-        claimed = str((event.get("claim_semantics", {}) or {}).get("object", ""))
-        event["truth_value"] = claimed == alternative
-        event["is_fake"] = claimed != alternative
-        event["spoofability"] = 0.25 if claimed == alternative else 0.75
+    for index, event in enumerate(counterpart.get("event_schedule", [])):
+        base = float(event.get("spoofability", 0.5))
+        event["spoofability"] = max(0.05, min(0.95, base + (0.12 if index % 2 else -0.12)))
+    phases = list(counterpart.get("true_attack", {}).get("phase_schedule", []))
+    if len(phases) >= 3:
+        phases[1], phases[2] = phases[2], phases[1]
+        counterpart["true_attack"]["phase_schedule"] = phases
     return counterpart
 
 
@@ -121,7 +155,7 @@ def canonical_recovery_group(task_id: str, group_index: int) -> list[dict[str, A
         metadata["experiment_variant"] = "full"
         second["metadata"] = metadata
     else:
-        second = _objective_counterpart(first)
+        second = _robust_hidden_counterpart(first)
     group = [first, second]
     for scenario in group:
         checks = full_check(scenario)

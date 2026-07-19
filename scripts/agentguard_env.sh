@@ -20,8 +20,9 @@ conda activate "${CONDA_ENV_NAME}"
 
 export PYTHONNOUSERSITE=1
 AGZ_ROOT=${AGZ_ROOT:-/home/share/huadjyin/home/s_qinhua2/AgentGuard-Zero}
+AGZ_RESOURCE_ROOT=${AGZ_RESOURCE_ROOT:-${AGZ_ROOT}}
 AGZ_ENABLE_SM80_OVERLAY=${AGZ_ENABLE_SM80_OVERLAY:-1}
-AGZ_TORCH_SM80_OVERLAY=${AGZ_TORCH_SM80_OVERLAY:-${AGZ_ROOT}/env_overlays/torch_sm80_py312}
+AGZ_TORCH_SM80_OVERLAY=${AGZ_TORCH_SM80_OVERLAY:-${AGZ_RESOURCE_ROOT}/env_overlays/torch_sm80_py312}
 AGZ_TORCH_SM80_LIB=${AGZ_TORCH_SM80_LIB:-/home/share/huadjyin/home/s_qinhua2/01software/miniconda3/envs/foundry-rfd3/lib}
 if [[ "${AGZ_ENABLE_SM80_OVERLAY}" == "1" && -d "${AGZ_TORCH_SM80_OVERLAY}" ]]; then
   export PYTHONPATH="${AGZ_TORCH_SM80_OVERLAY}:${PYTHONPATH:-}"
@@ -58,7 +59,10 @@ export VLLM_USE_V1=${VLLM_USE_V1:-0}
 export AGZ_DISABLE_TORCH_COMPILE=${AGZ_DISABLE_TORCH_COMPILE:-1}
 
 hash -r
+export AGZ_ROOT AGZ_RESOURCE_ROOT
 echo "Using conda env: ${CONDA_DEFAULT_ENV} (${CONDA_PREFIX})"
+echo "Using project root: ${AGZ_ROOT}"
+echo "Using external resource root: ${AGZ_RESOURCE_ROOT}"
 if [[ -n "${AGZ_ACTIVE_TORCH_OVERLAY:-}" ]]; then
   echo "Using torch sm80 overlay: ${AGZ_ACTIVE_TORCH_OVERLAY}"
 fi

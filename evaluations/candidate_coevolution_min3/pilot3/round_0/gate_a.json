@@ -1,0 +1,131 @@
+{
+  "accepted": false,
+  "created_at": "2026-07-19T11:36:11.294733Z",
+  "failures": [
+    "probe_yield",
+    "memory_operation_rate",
+    "memory_use_rate",
+    "attack_mitigation",
+    "safe_success"
+  ],
+  "gate": "candidate_gate_a",
+  "metrics": {
+    "action_validity": 1.0,
+    "actionable_decision_count": 10,
+    "actionable_observe_rate": 0.1,
+    "active_probe_rate": 0.3793103448275862,
+    "attack_mitigation": 0.0,
+    "by_task": {
+      "T1": {
+        "active_probe_rate": 0.5,
+        "decision_count": 6,
+        "invalid_noop_rate": 0.0,
+        "mean_candidate_regret": 0.009458333333333346,
+        "memory_operation_rate": 0.0,
+        "memory_use_rate": 0.0,
+        "mitigation_rate": 0.8333333333333334,
+        "observe_only_rate": 0.0,
+        "passive_verification_rate": 0.0,
+        "probe_followup_nonobserve_rate": 1.0,
+        "trust_rate": 0.3333333333333333
+      },
+      "T2": {
+        "active_probe_rate": 0.4,
+        "decision_count": 10,
+        "invalid_noop_rate": 0.0,
+        "mean_candidate_regret": 0.030000000000000027,
+        "memory_operation_rate": 0.0,
+        "memory_use_rate": 0.0,
+        "mitigation_rate": 0.5,
+        "observe_only_rate": 0.0,
+        "passive_verification_rate": 0.3,
+        "probe_followup_nonobserve_rate": 1.0,
+        "trust_rate": 0.6
+      },
+      "T3": {
+        "active_probe_rate": 0.2857142857142857,
+        "decision_count": 7,
+        "invalid_noop_rate": 0.0,
+        "mean_candidate_regret": 1.608357142857143,
+        "memory_operation_rate": 0.0,
+        "memory_use_rate": 0.0,
+        "mitigation_rate": 0.42857142857142855,
+        "observe_only_rate": 0.42857142857142855,
+        "passive_verification_rate": 0.0,
+        "probe_followup_nonobserve_rate": 0.5,
+        "trust_rate": 0.2857142857142857
+      },
+      "T4": {
+        "active_probe_rate": 0.3333333333333333,
+        "decision_count": 6,
+        "invalid_noop_rate": 0.0,
+        "mean_candidate_regret": 0.06125000000000003,
+        "memory_operation_rate": 0.0,
+        "memory_use_rate": 0.0,
+        "mitigation_rate": 0.5,
+        "observe_only_rate": 0.16666666666666666,
+        "passive_verification_rate": 0.3333333333333333,
+        "probe_followup_nonobserve_rate": 1.0,
+        "trust_rate": 0.0
+      }
+    },
+    "by_task_terminal": {
+      "T1": {
+        "attack_mitigation": 0.0,
+        "probe_yield": 0.0,
+        "safe_success": 0.0,
+        "safe_utility": -1.7011666666666667,
+        "scenario_count": 2
+      },
+      "T2": {
+        "attack_mitigation": 0.0,
+        "probe_yield": 0.0,
+        "safe_success": 0.0,
+        "safe_utility": -1.2758333333333334,
+        "scenario_count": 2
+      },
+      "T3": {
+        "attack_mitigation": 0.0,
+        "probe_yield": 0.0,
+        "safe_success": 0.0,
+        "safe_utility": -1.2824285714285715,
+        "scenario_count": 2
+      },
+      "T4": {
+        "attack_mitigation": 0.0,
+        "probe_yield": 0.0,
+        "safe_success": 0.0,
+        "safe_utility": -1.77625,
+        "scenario_count": 2
+      }
+    },
+    "decision_count": 29,
+    "decoding": "candidate_argmax",
+    "invalid_noop_rate": 0.0,
+    "mean_candidate_regret": 0.34370476190476196,
+    "memory_operation_rate": 0.0,
+    "memory_use_rate": 0.0,
+    "mitigation_rate": 0.5517241379310345,
+    "observe_only_rate": 0.13793103448275862,
+    "passive_verification_rate": 0.1724137931034483,
+    "probe_followup_nonobserve_rate": 0.9090909090909091,
+    "probe_yield": 0.0,
+    "safe_success": 0.0,
+    "safe_utility": -1.508919642857143,
+    "scenario_count": 8,
+    "trust_rate": 0.3448275862068966
+  },
+  "thresholds": {
+    "action_validity_min": 0.995,
+    "actionable_observe_rate_max": 0.7,
+    "active_probe_rate_min": 0.1,
+    "attack_mitigation_min": 0.15,
+    "invalid_noop_rate_max": 0.005,
+    "memory_operation_rate_min": 0.05,
+    "memory_use_rate_min": 0.03,
+    "mitigation_rate_min": 0.15,
+    "probe_yield_min": 0.1,
+    "safe_success_min": 0.1,
+    "trust_rate_min": 0.05
+  }
+}

@@ -18,3 +18,6 @@ export AGZ_LILY_CYBER_MODEL_PATH=/path/to/Lily-Cybersecurity-7B-v0.2
 
 # API evaluation reads the key from the variable named by --api_key_env.
 # export YOUR_PROVIDER_API_KEY=replace-at-runtime
+# Project source and external large-resource roots may be different.
+AGZ_ROOT=/path/to/AgentGuard-Zero
+AGZ_RESOURCE_ROOT=/path/to/read-only/AgentGuard-Zero-resources

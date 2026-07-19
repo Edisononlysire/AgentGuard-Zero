@@ -1,0 +1,34 @@
+{
+  "accepted": false,
+  "created_at": "2026-07-19T11:57:39.438173Z",
+  "curriculum_sha256": "e4e715c6f9e6632759959be2b9a13f727e19072d50f89cb4f02e0bd1cb88c3b1",
+  "failures": [
+    "frontier_scenario_rate"
+  ],
+  "kind": "candidate_dca_feedback_gate",
+  "metrics": {
+    "all_tasks_present": true,
+    "frontier_scenario_rate": 0.13333333333333333,
+    "mean_vda_regret": 0.2023404761904762,
+    "parser_or_compiler_exploit_count": 0,
+    "reward_variance": 0.1529326614006047,
+    "task_coverage": [
+      "T1",
+      "T2",
+      "T3",
+      "T4"
+    ],
+    "teacher_solvability": 1.0,
+    "vda_action_validity": 1.0,
+    "weakest_task": "T3"
+  },
+  "offline_evaluation_sha256": "3c311d18d19c7fad01e3599113be1cfdb4b2d2d48e0c844811087fd64d91acc7",
+  "schema_version": 1,
+  "thresholds": {
+    "frontier_scenario_rate_min": 0.3,
+    "parser_or_compiler_exploit_count": 0,
+    "reward_variance_exclusive": 0.0,
+    "teacher_solvability_min": 0.95,
+    "vda_action_validity_min": 0.995
+  }
+}

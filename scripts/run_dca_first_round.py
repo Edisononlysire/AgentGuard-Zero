@@ -289,6 +289,7 @@ def parse_args() -> argparse.Namespace:
             "tmcd_v2_pilot_fast_4k8_2k4",
             "tmcd_v24",
             "tmcd_v242",
+            "candidate_min3",
         ],
         default="tmcd_v2",
     )
@@ -649,13 +650,25 @@ def main() -> None:
                     f"DCA feedback log has {len(feedback_rows)} rows, expected at least "
                     f"{args.dca_feedback_candidates}"
                 )
-            valid_feedback_rows = [
-                row
-                for row in feedback_rows
-                if bool(row.get("parse_ok", False))
-                and bool((row.get("vda_evaluation", {}) or {}).get("oracle_solvable", False))
-                and "current_vda_safe_success" in (row.get("vda_evaluation", {}) or {})
-            ]
+            if os.environ.get("AGZ_VDA_POLICY_BACKEND") == "candidate_ranker":
+                valid_feedback_rows = [
+                    row
+                    for row in feedback_rows
+                    if bool(row.get("parse_ok", False))
+                    and bool((row.get("feedback", {}) or {}).get("teacher_solvable", False))
+                    and isinstance(
+                        (row.get("feedback", {}) or {}).get("safe_success_samples"),
+                        list,
+                    )
+                ]
+            else:
+                valid_feedback_rows = [
+                    row
+                    for row in feedback_rows
+                    if bool(row.get("parse_ok", False))
+                    and bool((row.get("vda_evaluation", {}) or {}).get("oracle_solvable", False))
+                    and "current_vda_safe_success" in (row.get("vda_evaluation", {}) or {})
+                ]
             if not valid_feedback_rows:
                 raise LineageError(
                     "DCA update produced no valid hard-but-solvable scenario evaluated by current VDA"
@@ -678,6 +691,17 @@ def main() -> None:
                 "feedback_rows": len(feedback_rows),
                 "valid_vda_evaluated_rows": len(valid_feedback_rows),
                 "feedback_unique_fingerprints": len(feedback_fingerprints(feedback_log_path)),
+                "vda_policy_backend": os.environ.get(
+                    "AGZ_VDA_POLICY_BACKEND", "free_json"
+                ),
+                "vda_ranker_manifest": os.environ.get(
+                    "AGZ_VDA_RANKER_MANIFEST"
+                ),
+                "vda_ranker_manifest_sha256": (
+                    sha256_file(os.environ["AGZ_VDA_RANKER_MANIFEST"])
+                    if os.environ.get("AGZ_VDA_RANKER_MANIFEST")
+                    else None
+                ),
                 "source_dca_manifest": str(dca_parent_path),
                 "source_dca_manifest_sha256": sha256_file(dca_parent_path),
                 "source_vda_manifest": str(vda_parent_path),

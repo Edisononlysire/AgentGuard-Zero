@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from agentguard_zero.recovery.public_teacher import compact_wire_packet
+from agentguard_zero.recovery.action_intent import (
+    INTENT_FORMAT,
+    compact_intent_prompt,
+    parse_action_intent,
+)
 from agentguard_zero.schemas.action_schema_v4 import (
     DEFAULT_ACTION_PACKET_V4,
     parse_action_json_v4,
@@ -35,6 +40,7 @@ class ModelDecision:
     valid: bool
     parse_reason: str
     action_category: str
+    generated_token_count: int
 
 
 def action_category(packet: Mapping[str, Any]) -> str:
@@ -70,6 +76,7 @@ class RecoveryModelPolicy:
         device: str = "cuda:0",
         max_new_tokens: int = 320,
         trust_remote_code: bool = True,
+        output_format: str = "full_v4",
     ) -> None:
         try:
             import torch
@@ -83,6 +90,13 @@ class RecoveryModelPolicy:
         self._torch = torch
         self.device = str(device)
         self.max_new_tokens = int(max_new_tokens)
+        if output_format not in {"full_v4", INTENT_FORMAT}:
+            raise ValueError(f"unsupported VDA output format: {output_format}")
+        self.output_format = output_format
+        # Qwen3.5 opens a <think> block by default.  The recovery targets are
+        # strict action JSON, so inference must use the tokenizer's explicit
+        # non-thinking prefix (the same closed-think prefix seen by SFT).
+        self.thinking_mode = "disabled"
         self.tokenizer = AutoTokenizer.from_pretrained(
             str(model_path),
             trust_remote_code=trust_remote_code,
@@ -106,12 +120,18 @@ class RecoveryModelPolicy:
         self.model.eval()
 
     def render_prompt(self, public_prompt: str) -> str:
-        messages = [{"role": "user", "content": public_prompt}]
+        content = (
+            compact_intent_prompt(public_prompt)
+            if self.output_format == INTENT_FORMAT
+            else public_prompt
+        )
+        messages = [{"role": "user", "content": content}]
         if getattr(self.tokenizer, "chat_template", None):
             return self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
+                enable_thinking=False,
             )
         return public_prompt
 
@@ -133,8 +153,12 @@ class RecoveryModelPolicy:
                 eos_token_id=self.tokenizer.eos_token_id,
             )
         suffix = generated[0, encoded["input_ids"].shape[1] :]
+        generated_token_count = int(suffix.numel())
         text = self.tokenizer.decode(suffix, skip_special_tokens=True).strip()
-        packet, valid, reason = parse_action_json_v4(text)
+        if self.output_format == INTENT_FORMAT:
+            packet, valid, reason = parse_action_intent(text)
+        else:
+            packet, valid, reason = parse_action_json_v4(text)
         if not valid:
             fallback = copy.deepcopy(DEFAULT_ACTION_PACKET_V4)
             return ModelDecision(
@@ -143,6 +167,7 @@ class RecoveryModelPolicy:
                 valid=False,
                 parse_reason=reason,
                 action_category="observe",
+                generated_token_count=generated_token_count,
             )
         compact = compact_wire_packet(packet)
         return ModelDecision(
@@ -151,4 +176,5 @@ class RecoveryModelPolicy:
             valid=True,
             parse_reason="ok",
             action_category=action_category(compact),
+            generated_token_count=generated_token_count,
         )

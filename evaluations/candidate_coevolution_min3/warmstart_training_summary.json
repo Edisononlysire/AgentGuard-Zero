@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "kind": "candidate_warmstart_training_summary",
+  "stages": [
+    {
+      "stage": "A1",
+      "objective": "family",
+      "optimizer_steps": 4,
+      "learning_rate": 1e-05,
+      "train_loss": 5.268661141395569,
+      "adapter_sha256": "450d781629a3f09f2831434c32bf31b3a3f25947d3d3f272420906249b12c9c1",
+      "heads_sha256": "d702e8a4c995ce388048001a884de39f61e5f145902a1711b1f02950a9acceba"
+    },
+    {
+      "stage": "A2",
+      "objective": "listwise",
+      "optimizer_steps": 4,
+      "learning_rate": 5e-06,
+      "train_loss": 6.03037703037262,
+      "adapter_sha256": "c1589086fee48005950129dc46e9d058f47e59308fafd2f69f2db2d1bc7b332f",
+      "heads_sha256": "cb0d969bde5e6d92325e705a18f0b86f2fda16645de7562908b38852842f3ecf"
+    },
+    {
+      "stage": "A3",
+      "objective": "preference",
+      "optimizer_steps": 4,
+      "learning_rate": 2e-06,
+      "train_loss": 2.835059940814972,
+      "adapter_sha256": "cc790d16e59948e3770b6c054cb7e74c819907459669687740d32b769f2d92ac",
+      "heads_sha256": "a6bfe0b47cff6bb6c9caf2c1b0092b40a5fba2b8ca4026b88c41bd370693b31c"
+    }
+  ],
+  "heldout_decisions_changed_between_stages": false,
+  "heldout_candidate_top1_accuracy": 0.0,
+  "heldout_mean_teacher_regret": 1.4166590277777777,
+  "heldout_active_probe_rate": 0.3333333333333333,
+  "heldout_memory_operation_rate": 0.0
+}

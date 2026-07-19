@@ -1,0 +1,73 @@
+{
+  "accepted": true,
+  "created_at": "2026-07-19T10:14:56.291525Z",
+  "kind": "candidate_skill_identifiability_gate",
+  "schema_version": 1,
+  "tasks": {
+    "T1": {
+      "accepted": true,
+      "core_utility_gap": 1.5163333333333333,
+      "diagnostics": [
+        {
+          "decision_step": 0.0,
+          "full_robust_utility": 1.591,
+          "no_skill_robust_utility": 0.07466666666666666,
+          "utility_gap": 1.5163333333333333,
+          "world_count": 2.0
+        }
+      ],
+      "safe_success_gap": null,
+      "skill": "active_probe"
+    },
+    "T2": {
+      "accepted": true,
+      "core_utility_gap": 1.5532166666666667,
+      "diagnostics": [
+        {
+          "decision_step": 0.0,
+          "full_robust_utility": 1.5845500000000001,
+          "no_skill_robust_utility": 0.03133333333333334,
+          "utility_gap": 1.5532166666666667,
+          "world_count": 2.0
+        }
+      ],
+      "safe_success_gap": null,
+      "skill": "trust"
+    },
+    "T3": {
+      "accepted": true,
+      "core_utility_gap": 0.11391428571428572,
+      "diagnostics": [
+        {
+          "decision_step": 0.0,
+          "full_robust_utility": 0.07391428571428571,
+          "no_skill_robust_utility": -0.04000000000000001,
+          "utility_gap": 0.11391428571428572,
+          "world_count": 2.0
+        }
+      ],
+      "safe_success_gap": null,
+      "skill": "memory"
+    },
+    "T4": {
+      "accepted": true,
+      "core_utility_gap": 1.397,
+      "diagnostics": [
+        {
+          "decision_step": 0.0,
+          "full_robust_utility": 1.4883333333333333,
+          "no_skill_robust_utility": 0.09133333333333334,
+          "utility_gap": 1.397,
+          "world_count": 2.0
+        }
+      ],
+      "safe_success_gap": null,
+      "skill": "business_response"
+    }
+  },
+  "thresholds": {
+    "core_utility_gap": 0.1,
+    "rule": "same-state H=3 robust utility gap; terminal safe-success gap optional",
+    "safe_success_gap": 0.1
+  }
+}

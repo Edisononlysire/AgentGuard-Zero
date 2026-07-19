@@ -26,6 +26,14 @@ obtained models and compute.
 > optimal defence actions; cold-start targets are generated and verified by
 > the simulator.
 
+> **Candidate diagnostic (2026-07-19):** a complete probe-centric candidate
+> ranker and capability-gated co-evolution path is available in
+> [docs/CANDIDATE_COEVOLUTION_MIN3.md](docs/CANDIDATE_COEVOLUTION_MIN3.md).
+> Its minimum three-round run preserved active probing and fixed action
+> compilation, but did not learn successful mitigation, probe yield, or Memory
+> use. All three checkpoints were rolled back and remain excluded from formal
+> results.
+
 ## Recovery Method At A Glance
 
 ```text
@@ -59,6 +67,8 @@ payloads, exploit real systems, or execute network attacks.
 |---|---|
 | `agentguard_zero/` | schemas, simulator, memory, rewards, tools, lineage |
 | `agentguard_zero/recovery/` | robust teacher, bootstrap builder, gates, dynamic sampling |
+| `agentguard_zero/candidate/` | public candidates, compiler, multi-head ranker, policy, metrics |
+| `docs/CANDIDATE_COEVOLUTION_MIN3.md` | probe-centric candidate protocol and minimum-run status |
 | `configs/recovery/action_support_bootstrap_v1.json` | frozen recovery protocol |
 | `docs/ACTION_SUPPORT_RECOVERY.md` | active recovery lineage and execution gates |
 | `scripts/run_dca_first_round.py` | historical failed-lineage reproduction launcher |

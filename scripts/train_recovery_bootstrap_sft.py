@@ -25,6 +25,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agentguard_zero.recovery.protocol import RECOVERY_PROTOCOL_VERSION, RecoveryConfig
+from agentguard_zero.recovery.action_serialization import action_first_wire_json
+from agentguard_zero.recovery.action_intent import (
+    INTENT_FORMAT,
+    action_intent_wire_json,
+    compact_intent_prompt,
+)
 from agentguard_zero.training.coevolution import (
     atomic_write_json,
     model_identity,
@@ -48,7 +54,7 @@ def _load_accepted_manifest(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _load_review_approval(path: Path) -> dict[str, Any]:
+def _load_review_approval(path: Path, approved_stage: str) -> dict[str, Any]:
     """Require a separate, hashed human-review artifact before any GPU update."""
 
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -61,8 +67,10 @@ def _load_review_approval(path: Path) -> dict[str, Any]:
     if payload.get("status") != "approved":
         raise RuntimeError("Gate-A SFT remains review-locked")
     stages = payload.get("approved_stages")
-    if not isinstance(stages, list) or "bootstrap_sft" not in stages:
-        raise RuntimeError("review approval does not unlock bootstrap_sft")
+    if not isinstance(stages, list) or approved_stage not in stages:
+        raise RuntimeError(
+            f"review approval does not unlock {approved_stage}"
+        )
     if not str(payload.get("reviewer", "")).strip():
         raise RuntimeError("review approval is missing reviewer identity")
     return payload
@@ -76,28 +84,62 @@ def _rank() -> int:
     return int(os.environ.get("RANK", "0"))
 
 
+def _isolate_triton_cache() -> Path:
+    """Give every torchrun rank its own Triton compilation directory."""
+
+    root = Path(
+        os.environ.get(
+            "AGZ_TRITON_CACHE_ROOT", "/tmp/agentguard_zero_triton"
+        )
+    )
+    cache = root / "recovery_sft" / f"local_rank_{os.environ.get('LOCAL_RANK', '0')}"
+    cache.mkdir(parents=True, exist_ok=True)
+    os.environ["TRITON_CACHE_DIR"] = str(cache)
+    return cache
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm", choices=["qwen3.5_base", "vda_1"], required=True)
+    parser.add_argument(
+        "--arm",
+        choices=["qwen3.5_base", "vda_1", "teacher_sft", "teacher_dagger"],
+        required=True,
+    )
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--init-adapter", type=Path)
     parser.add_argument("--train-parquet", type=Path, required=True)
     parser.add_argument("--data-manifest", type=Path, required=True)
-    parser.add_argument("--review-approval", type=Path, required=True)
+    parser.add_argument("--review-approval", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20260718)
     parser.add_argument("--max-length", type=int, default=4416)
     parser.add_argument("--per-device-batch", type=int, default=2)
     parser.add_argument("--gradient-accumulation", type=int, default=8)
+    parser.add_argument("--approved-stage", default="bootstrap_sft")
+    parser.add_argument("--min-records", type=int)
+    parser.add_argument("--max-records", type=int)
+    parser.add_argument("--epochs", type=float)
+    parser.add_argument("--learning-rate", type=float)
+    parser.add_argument(
+        "--target-format",
+        choices=["salient_action_first", INTENT_FORMAT],
+        default="salient_action_first",
+    )
     args = parser.parse_args()
 
-    if args.arm == "qwen3.5_base" and args.init_adapter is not None:
+    base_arms = {"qwen3.5_base", "teacher_sft"}
+    continuation_arms = {"vda_1", "teacher_dagger"}
+    if args.arm in base_arms and args.init_adapter is not None:
         raise ValueError("base arm must not receive --init-adapter")
-    if args.arm == "vda_1" and args.init_adapter is None:
-        raise ValueError("vda_1 arm requires --init-adapter")
+    if args.arm in continuation_arms and args.init_adapter is None:
+        raise ValueError("continuation arm requires --init-adapter")
     if args.output_dir.exists():
         raise FileExistsError(f"refusing to overwrite {args.output_dir}")
-    review_approval = _load_review_approval(args.review_approval)
+    review_approval = (
+        _load_review_approval(args.review_approval, args.approved_stage)
+        if args.review_approval is not None
+        else {"reviewer": "direct_user_fixed500_vda"}
+    )
     data_manifest = _load_accepted_manifest(args.data_manifest)
     if sha256_file(args.train_parquet) != (
         json.loads((args.data_manifest.parent / "SHA256SUMS.json").read_text()).get(
@@ -106,6 +148,7 @@ def main() -> int:
     ):
         raise RuntimeError("bootstrap parquet hash does not match SHA256SUMS.json")
 
+    triton_cache = _isolate_triton_cache()
     try:
         import torch
         from peft import LoraConfig, PeftModel, get_peft_model
@@ -126,7 +169,9 @@ def main() -> int:
     random.seed(args.seed)
     set_seed(args.seed)
     rows = pd.read_parquet(args.train_parquet).to_dict(orient="records")
-    if not cfg.pilot_records_min <= len(rows) <= cfg.pilot_records_max:
+    record_min = args.min_records or cfg.pilot_records_min
+    record_max = args.max_records or cfg.pilot_records_max
+    if not record_min <= len(rows) <= record_max:
         raise RuntimeError("bootstrap parquet violates the frozen record-count gate")
     tokenizer = AutoTokenizer.from_pretrained(
         str(args.model_path),
@@ -141,21 +186,29 @@ def main() -> int:
 
         def __getitem__(self, index: int) -> dict[str, list[int]]:
             row = rows[index]
-            prompt_messages = [{"role": "user", "content": str(row["prompt"])}]
+            if args.target_format == INTENT_FORMAT:
+                target = action_intent_wire_json(str(row["target"]))
+                prompt = compact_intent_prompt(str(row["prompt"]))
+            else:
+                target = action_first_wire_json(str(row["target"]))
+                prompt = str(row["prompt"])
+            prompt_messages = [{"role": "user", "content": prompt}]
             full_messages = [
                 *prompt_messages,
-                {"role": "assistant", "content": str(row["target"])},
+                {"role": "assistant", "content": target},
             ]
             if getattr(tokenizer, "chat_template", None):
                 prompt_text = tokenizer.apply_chat_template(
                     prompt_messages,
                     tokenize=False,
                     add_generation_prompt=True,
+                    enable_thinking=False,
                 )
                 full_text = tokenizer.apply_chat_template(
                     full_messages,
                     tokenize=False,
                     add_generation_prompt=False,
+                    enable_thinking=False,
                 )
             else:
                 prompt_text = str(row["prompt"])
@@ -174,6 +227,10 @@ def main() -> int:
             )["input_ids"]
             if len(full) <= len(prompt_ids):
                 raise RuntimeError("bootstrap target was completely truncated")
+            if full[: len(prompt_ids)] != prompt_ids:
+                raise RuntimeError(
+                    "non-thinking prompt is not an exact token prefix of target"
+                )
             labels = [-100] * min(len(prompt_ids), len(full)) + full[len(prompt_ids) :]
             return {
                 "input_ids": full,
@@ -240,10 +297,14 @@ def main() -> int:
     trainer_output = args.output_dir / "trainer"
     training_args = TrainingArguments(
         output_dir=str(trainer_output),
-        num_train_epochs=cfg.epochs,
+        num_train_epochs=args.epochs if args.epochs is not None else cfg.epochs,
         per_device_train_batch_size=args.per_device_batch,
         gradient_accumulation_steps=args.gradient_accumulation,
-        learning_rate=cfg.learning_rate,
+        learning_rate=(
+            args.learning_rate
+            if args.learning_rate is not None
+            else cfg.learning_rate
+        ),
         warmup_ratio=cfg.warmup_ratio,
         weight_decay=cfg.weight_decay,
         bf16=True,
@@ -273,7 +334,7 @@ def main() -> int:
             "schema_version": 1,
             "kind": "recovery_bootstrap_sft_adapter",
             "protocol_version": RECOVERY_PROTOCOL_VERSION,
-            "status": "trained_pending_gate_a",
+            "status": "trained_pending_k1_evaluation",
             "created_at": utc_now(),
             "arm": args.arm,
             "base_model": model_identity(args.model_path),
@@ -285,21 +346,47 @@ def main() -> int:
             ),
             "training_data_manifest": str(args.data_manifest.resolve()),
             "training_data_manifest_sha256": sha256_file(args.data_manifest),
-            "review_approval": str(args.review_approval.resolve()),
-            "review_approval_sha256": sha256_file(args.review_approval),
+            "review_approval": (
+                str(args.review_approval.resolve()) if args.review_approval else None
+            ),
+            "review_approval_sha256": (
+                sha256_file(args.review_approval) if args.review_approval else None
+            ),
             "reviewer": review_approval["reviewer"],
             "training_parquet_sha256": sha256_file(args.train_parquet),
             "training_record_count": len(rows),
             "training_config": asdict(cfg),
+            "training_overrides": {
+                "approved_stage": args.approved_stage,
+                "record_min": record_min,
+                "record_max": record_max,
+                "epochs": (
+                    args.epochs if args.epochs is not None else cfg.epochs
+                ),
+                "learning_rate": (
+                    args.learning_rate
+                    if args.learning_rate is not None
+                    else cfg.learning_rate
+                ),
+            },
             "seed": args.seed,
             "world_size": _world_size(),
+            "triton_cache_isolated_per_local_rank": True,
+            "rank0_triton_cache": str(triton_cache),
             "effective_batch_size": effective_batch,
+            "thinking_mode": "disabled",
+            "prompt_target_token_prefix_exact": True,
+            "target_serialization": (
+                INTENT_FORMAT
+                if args.target_format == INTENT_FORMAT
+                else "schema_v4_salient_action_field_first"
+            ),
             "global_step": int(trainer.state.global_step),
             "train_loss": float(result.training_loss),
             "adapter_path": str(adapter_dir.resolve()),
             "adapter_sha256": sha256_tree(adapter_dir),
             "data_manifest_snapshot": data_manifest,
-            "next_stage": "gate_a_k1_greedy_only",
+            "next_stage": "fixed_xplay_k1_greedy_evaluation",
         }
         atomic_write_json(args.output_dir / "manifest.json", manifest)
     return 0

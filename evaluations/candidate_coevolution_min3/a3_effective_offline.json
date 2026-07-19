@@ -1,0 +1,181 @@
+{
+  "candidate_sets_sha256": "7dd50787629e64462b7e68b7ec1b5e0377f773eecea031fbf85d8f7ac1be9f96",
+  "created_at": "2026-07-19T11:30:21.064047Z",
+  "kind": "candidate_ranker_offline_evaluation",
+  "metrics": {
+    "action_family_accuracy": 0.3333333333333333,
+    "actionable_observe_rate": 0.0,
+    "active_probe_rate": 0.3333333333333333,
+    "by_task": {
+      "unknown": {
+        "action_family_accuracy": 0.3333333333333333,
+        "actionable_observe_rate": 0.0,
+        "active_probe_rate": 0.3333333333333333,
+        "candidate_top1_accuracy": 0.0,
+        "mean_teacher_core_regret": 1.3761805555555557,
+        "mean_teacher_regret": 1.4166590277777777,
+        "memory_operation_rate": 0.0,
+        "memory_use_rate": 0.0,
+        "mitigation_rate": 0.6666666666666666,
+        "observe_only_rate": 0.0,
+        "passive_verification_rate": 0.16666666666666666,
+        "probe_followup_nonobserve_rate": 1.0,
+        "record_count": 6,
+        "trust_rate": 0.5
+      }
+    },
+    "candidate_top1_accuracy": 0.0,
+    "mean_teacher_core_regret": 1.3761805555555557,
+    "mean_teacher_regret": 1.4166590277777777,
+    "probe_followup_nonobserve_rate": 1.0,
+    "record_count": 6,
+    "selected_family_counts": {
+      "active_probe": 2,
+      "mitigation": 2,
+      "passive_verification": 1,
+      "trust": 1
+    }
+  },
+  "ranker_manifest_sha256": "5e00b4c26e4f7f52a8bb0705b7c1243e1b4a75c3c71660537349a94264317a7d",
+  "schema_version": 1,
+  "traces": [
+    {
+      "action_flags": {
+        "active_probe": false,
+        "memory_operation": false,
+        "memory_use": false,
+        "mitigation": true,
+        "observe_only": false,
+        "passive_verification": false,
+        "trust": false
+      },
+      "probe_followup_state": false,
+      "record_id": "cc3902d470fbe559882a1b8dfdf17a07ec76103dfae96dac92e6c87626ed51ed",
+      "selected_candidate_id": "k_88dd9d59d6a7",
+      "selected_family": "mitigation",
+      "selected_semantic_id": "9fd16aca5b716ec36365",
+      "target_candidate_id": "k_4b2409ce121d",
+      "target_family": "observe",
+      "target_semantic_id": "a97e2123436656510ea1",
+      "task_id": "unknown",
+      "teacher_actionable": false,
+      "teacher_core_regret": 0.9637500000000001,
+      "teacher_regret": 0.9097500000000001
+    },
+    {
+      "action_flags": {
+        "active_probe": false,
+        "memory_operation": false,
+        "memory_use": false,
+        "mitigation": false,
+        "observe_only": false,
+        "passive_verification": true,
+        "trust": false
+      },
+      "probe_followup_state": false,
+      "record_id": "891dc3d65df90b498bb01421d4a27e3069a66e8fd8230ed3c861ebccf6c8cf69",
+      "selected_candidate_id": "k_b7638a0c8064",
+      "selected_family": "passive_verification",
+      "selected_semantic_id": "604d106054b8bf791906",
+      "target_candidate_id": "k_b7be1ec5c5e8",
+      "target_family": "passive_verification",
+      "target_semantic_id": "3c7ca62d3a78265233d2",
+      "task_id": "unknown",
+      "teacher_actionable": true,
+      "teacher_core_regret": 1.405,
+      "teacher_regret": 1.457
+    },
+    {
+      "action_flags": {
+        "active_probe": false,
+        "memory_operation": false,
+        "memory_use": false,
+        "mitigation": false,
+        "observe_only": false,
+        "passive_verification": false,
+        "trust": true
+      },
+      "probe_followup_state": true,
+      "record_id": "54c1650d6acb7298911de3f14844610f1e2eed103002999d20459a5cd4996a56",
+      "selected_candidate_id": "k_cde89ed4dc21",
+      "selected_family": "trust",
+      "selected_semantic_id": "9840830480906d3d7e95",
+      "target_candidate_id": "k_d3dc2381031d",
+      "target_family": "observe",
+      "target_semantic_id": "066264e0a1f73f9ba6cf",
+      "task_id": "unknown",
+      "teacher_actionable": false,
+      "teacher_core_regret": 0.0,
+      "teacher_regret": 0.04244999999999988
+    },
+    {
+      "action_flags": {
+        "active_probe": false,
+        "memory_operation": false,
+        "memory_use": false,
+        "mitigation": true,
+        "observe_only": false,
+        "passive_verification": false,
+        "trust": false
+      },
+      "probe_followup_state": false,
+      "record_id": "b5bf6053bdf9e76871d84d3bfe0e87a2bfca420d99fa637a006d42d1130bf24e",
+      "selected_candidate_id": "k_6254f72e80f8",
+      "selected_family": "mitigation",
+      "selected_semantic_id": "3baf91f260de3121ab12",
+      "target_candidate_id": "k_3a5096ca8081",
+      "target_family": "mitigation",
+      "target_semantic_id": "e2d2a1e1a3547938c6e1",
+      "task_id": "unknown",
+      "teacher_actionable": true,
+      "teacher_core_regret": 2.961666666666667,
+      "teacher_regret": 3.0136666666666665
+    },
+    {
+      "action_flags": {
+        "active_probe": true,
+        "memory_operation": false,
+        "memory_use": false,
+        "mitigation": true,
+        "observe_only": false,
+        "passive_verification": false,
+        "trust": true
+      },
+      "probe_followup_state": false,
+      "record_id": "400ccc89cbf46c01fe3ae16a7fb87a50906488ce599bc1e25f43fe1634d69567",
+      "selected_candidate_id": "k_a59e4e9946ce",
+      "selected_family": "active_probe",
+      "selected_semantic_id": "d4d1331f800d669565ab",
+      "target_candidate_id": "k_6bde1eb9cd3e",
+      "target_family": "trust",
+      "target_semantic_id": "9ac3eb2416ccfd25b741",
+      "task_id": "unknown",
+      "teacher_actionable": true,
+      "teacher_core_regret": 1.4716666666666667,
+      "teacher_regret": 1.6300875000000001
+    },
+    {
+      "action_flags": {
+        "active_probe": true,
+        "memory_operation": false,
+        "memory_use": false,
+        "mitigation": true,
+        "observe_only": false,
+        "passive_verification": false,
+        "trust": true
+      },
+      "probe_followup_state": false,
+      "record_id": "8b71df15dc4c7f6bd9a1c1acc43fc7703c0905a50595d44c1a6925533191a17c",
+      "selected_candidate_id": "k_e3a3764377da",
+      "selected_family": "active_probe",
+      "selected_semantic_id": "049a0d9127ccf44fb69c",
+      "target_candidate_id": "k_b084244bb975",
+      "target_family": "passive_verification",
+      "target_semantic_id": "1752bd10e1875a70e56a",
+      "task_id": "unknown",
+      "teacher_actionable": true,
+      "teacher_core_regret": 1.455,
+      "teacher_regret": 1.447
+    }
+  ]
+}

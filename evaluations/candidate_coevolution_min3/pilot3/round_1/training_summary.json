@@ -1,0 +1,19 @@
+{
+  "adapter_sha256": "6501ffd2c108df02175faae987ffce2336c92cb2f23a16616482b21e468aa0de",
+  "created_at": "2026-07-19T11:41:04.304218Z",
+  "heads_sha256": "f2a83df940a7b31724324df3362e9350fd5140fca8634dad2af4785d2c48f4f8",
+  "kind": "candidate_round_training_log_summary",
+  "learning_rate": 3e-06,
+  "objective": "joint",
+  "round_index": 1,
+  "schema_version": 1,
+  "source_data_manifest_sha256": "e79f10769ea7c459f153cd4ea99ce016043e2665579c8f3c3c9da9485149dd20",
+  "train_metrics": {
+    "epoch": 1.0,
+    "total_flos": 0.0,
+    "train_loss": 5.289339661598206,
+    "train_runtime": 90.4808,
+    "train_samples_per_second": 0.177,
+    "train_steps_per_second": 0.044
+  }
+}

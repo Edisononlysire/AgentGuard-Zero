@@ -506,6 +506,9 @@ def _candidate_is_public(
             and str(operation.get("memory_id", "")) not in memories
         ):
             return False
+    for usage in packet.get("memory_usage", []) or []:
+        if str(usage.get("memory_id", "")) not in memories:
+            return False
     return True
 
 
@@ -678,6 +681,59 @@ def enumerate_public_candidates(
             )
         )
 
+    memory_status: dict[str, str] = {}
+    memory_blob = (observation.get("defender_state", {}) or {}).get("memory", {}) or {}
+    for row in _walk_dicts(memory_blob):
+        memory_id = str(row.get("memory_id", ""))
+        if memory_id:
+            memory_status[memory_id] = str(row.get("status", "quarantined"))
+    combinable = [
+        row
+        for row in candidates
+        if row.category in {"passive_verification", "active_probe", "mitigation"}
+    ]
+    for memory_id in inventory.memory_ids:
+        role = "support" if memory_status.get(memory_id) == "confirmed" else "contradict"
+        per_category: dict[str, int] = {}
+        for base in combinable:
+            if per_category.get(base.category, 0) >= (4 if base.category == "mitigation" else 2):
+                continue
+            packet = copy.deepcopy(base.packet)
+            packet["memory_usage"] = [
+                {
+                    "memory_id": memory_id,
+                    "usage": role,
+                    "used_for": "response" if base.category == "mitigation" else "tool",
+                }
+            ]
+            candidates.append(
+                ActionCandidate(
+                    base.category,
+                    packet,
+                    f"memory_use:{memory_id}+{base.label}",
+                )
+            )
+            per_category[base.category] = per_category.get(base.category, 0) + 1
+
+    trust_packets = [
+        row for row in candidates if row.category == "trust" and row.packet.get("trust_operations")
+    ]
+    probe_packets = [row for row in candidates if row.category == "active_probe"]
+    for trust in trust_packets[:2]:
+        for probe in probe_packets[:3]:
+            packet = copy.deepcopy(probe.packet)
+            packet["trust_operations"] = copy.deepcopy(trust.packet["trust_operations"])
+            packet["evidence_assessment"] = copy.deepcopy(
+                trust.packet.get("evidence_assessment", [])
+            )
+            candidates.append(
+                ActionCandidate(
+                    "active_probe",
+                    packet,
+                    f"trust_probe:{trust.label}+{probe.label}",
+                )
+            )
+
     deduped: dict[str, ActionCandidate] = {}
     for candidate in candidates:
         if _candidate_is_public(candidate, inventory):
@@ -820,6 +876,9 @@ class PublicStateRobustTeacher:
         min_worlds_per_public_state: int = 2,
         beam_width: int = 20,
         max_candidates: int = 96,
+        allowed_categories: Sequence[str] | None = None,
+        disabled_skills: Sequence[str] = (),
+        core_tolerance: float = 0.02,
     ) -> None:
         if advantage_delta < 0.0:
             raise ValueError("advantage_delta must be non-negative")
@@ -834,6 +893,16 @@ class PublicStateRobustTeacher:
         self.beam_width = int(beam_width)
         self.continuation_beam_width = min(8, self.beam_width)
         self.max_candidates = max(1, int(max_candidates))
+        self.allowed_categories = frozenset(allowed_categories or ACTION_CATEGORIES)
+        self.disabled_skills = frozenset(map(str, disabled_skills))
+        if "observe" not in self.allowed_categories:
+            raise ValueError("core-first teacher always requires Observe")
+        unknown = self.allowed_categories.difference(ACTION_CATEGORIES)
+        if unknown:
+            raise ValueError(f"unknown teacher action categories: {sorted(unknown)}")
+        if core_tolerance < 0.0:
+            raise ValueError("core_tolerance must be non-negative")
+        self.core_tolerance = float(core_tolerance)
 
     @staticmethod
     def _candidate_family(candidate: ActionCandidate) -> str:
@@ -880,6 +949,12 @@ class PublicStateRobustTeacher:
             def public_priority(row: ActionCandidate) -> tuple[Any, ...]:
                 response = row.packet.get("response", {}) or {}
                 target = str(response.get("target", ""))
+                requirements = (
+                    (observation.get("defense_context", {}) or {}).get(
+                        "response_requirements", {}
+                    )
+                    or {}
+                )
                 mitigation_order = {
                     "ShadowBlock": 0,
                     "LimitSession": 1,
@@ -889,6 +964,13 @@ class PublicStateRobustTeacher:
                     "Isolate": 5,
                 }
                 return (
+                    (
+                        0
+                        if not requirements.get("memory_use_required_for_mitigation")
+                        or row.category != "mitigation"
+                        or bool(row.packet.get("memory_usage"))
+                        else 1
+                    ),
                     0 if target in observed_entities else 1,
                     (
                         mitigation_order.get(str(response.get("action", "")), 0)
@@ -1060,6 +1142,34 @@ class PublicStateRobustTeacher:
             observation,
             max_candidates=self.max_candidates,
         )
+        public_candidates = [
+            row for row in public_candidates if row.category in self.allowed_categories
+        ]
+        if "active_probe" in self.disabled_skills:
+            public_candidates = [
+                row for row in public_candidates if row.category != "active_probe"
+            ]
+        if "trust" in self.disabled_skills:
+            public_candidates = [
+                row
+                for row in public_candidates
+                if row.category != "trust" and not row.packet.get("trust_operations")
+            ]
+        if "memory" in self.disabled_skills:
+            public_candidates = [
+                row
+                for row in public_candidates
+                if row.category != "memory"
+                and not row.packet.get("memory_operations")
+                and not row.packet.get("memory_usage")
+            ]
+        if "business_response" in self.disabled_skills:
+            public_candidates = [
+                row
+                for row in public_candidates
+                if str((row.packet.get("tool_call") or {}).get("name", ""))
+                not in {"BusinessImpactEstimator", "ShadowActionProbe"}
+            ]
         immediate: list[_SearchOption] = []
         candidate_pool = self._candidate_pool(
             public_candidates,
@@ -1110,8 +1220,13 @@ class PublicStateRobustTeacher:
         observe = next(
             item for item in completed if item.candidate.category == "observe"
         )
+        core_eligible = [
+            item
+            for item in completed
+            if item.core_value >= observe.core_value - self.core_tolerance - 1.0e-12
+        ]
         best = max(
-            completed,
+            core_eligible,
             key=lambda item: (item.robust_value, item.candidate.candidate_id),
         )
         # Equality belongs to Observe.  The tolerance prevents a nominal

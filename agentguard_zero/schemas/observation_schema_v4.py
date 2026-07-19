@@ -19,6 +19,7 @@ def make_observation_v4(
     remaining_high_impact_actions: int,
     last_tool_result: dict[str, Any] | None,
     public_probe_state: list[dict[str, Any]],
+    response_requirements: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     observation = {
         "protocol_version": "tmcd-v2",
@@ -36,6 +37,7 @@ def make_observation_v4(
             "remaining_business_budget": float(remaining_business_budget),
             "remaining_verification_budget": float(verification_remaining),
             "remaining_high_impact_actions": int(remaining_high_impact_actions),
+            "response_requirements": copy.deepcopy(response_requirements or {}),
         },
         "last_tool_result": copy.deepcopy(last_tool_result),
     }

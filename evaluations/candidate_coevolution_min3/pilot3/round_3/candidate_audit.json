@@ -1,0 +1,48 @@
+{
+  "accepted": true,
+  "candidate_sets_sha256": "4f1313c95f6c3ca7005e4076db3c8ae0d4405c1572f4af4cd9724dc3ae74fc1f",
+  "created_at": "2026-07-19T11:55:57.434736Z",
+  "kind": "candidate_dataset_audit",
+  "metrics": {
+    "candidate_count": 300,
+    "candidate_permutation_consistency": 1.0,
+    "compiler_validity": 1.0,
+    "core_regret_p95": 0.0,
+    "mean_candidate_count": 20,
+    "near_optimal_candidate_recall": 1.0,
+    "public_reference_validity": 1.0,
+    "semantic_duplicate_rate": 0.0,
+    "semantic_target_conflict_rate": 0.0,
+    "state_count": 15,
+    "teacher_best_candidate_recall": 1.0
+  },
+  "schema_version": 1,
+  "verdict": {
+    "accepted": true,
+    "failures": [],
+    "gate": "candidate_compiler",
+    "metrics": {
+      "candidate_count": 300,
+      "candidate_permutation_consistency": 1.0,
+      "compiler_validity": 1.0,
+      "core_regret_p95": 0.0,
+      "mean_candidate_count": 20,
+      "near_optimal_candidate_recall": 1.0,
+      "public_reference_validity": 1.0,
+      "semantic_duplicate_rate": 0.0,
+      "semantic_target_conflict_rate": 0.0,
+      "state_count": 15,
+      "teacher_best_candidate_recall": 1.0
+    },
+    "thresholds": {
+      "candidate_permutation_consistency": 1.0,
+      "compiler_validity": 1.0,
+      "core_regret_p95_max": 0.02,
+      "near_optimal_candidate_recall_min": 0.99,
+      "public_reference_validity": 1.0,
+      "semantic_duplicate_rate_max": 0.05,
+      "semantic_target_conflict_rate": 0.0,
+      "teacher_best_candidate_recall_min": 0.95
+    }
+  }
+}

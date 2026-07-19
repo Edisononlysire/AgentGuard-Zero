@@ -8,6 +8,7 @@ __pycache__/
 venv/
 .pytest_cache/
 .ruff_cache/
+.codex-v2.4/
 *.egg-info/
 build/
 dist/
@@ -19,6 +20,7 @@ dist/
 /logs/
 /models/
 /outputs/
+/tmp/
 /wandb/
 /env_overlays/
 *.parquet
