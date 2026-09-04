@@ -115,6 +115,64 @@ def recovery_core_utility(
     return float(sum(recovery_core_components(env, score, config).values()))
 
 
+def raw_safe_utility(
+    score: Mapping[str, Any], *, steps: int, max_steps: int, business_budget: float
+) -> float:
+    """Return Raw Safe Utility before Random/Oracle normalization."""
+
+    attack_mitigation = float(bool(score.get("attack_mitigated", False)))
+    intent_accuracy = float(bool(score.get("correct_intent", False)))
+    business_cost = min(
+        1.0,
+        max(
+            0.0,
+            _finite(score.get("business_cost", 0.0), "business_cost")
+            / max(1.0, float(business_budget)),
+        ),
+    )
+    overresponse = float(bool(score.get("overresponse", False)))
+    verification_cost = min(
+        1.0,
+        max(
+            0.0,
+            _finite(score.get("verification_cost", 0.0), "verification_cost")
+            / max(1.0, float(max_steps)),
+        ),
+    )
+    delay = min(1.0, max(0.0, float(steps) / max(1.0, float(max_steps))))
+    return float(
+        0.35 * attack_mitigation
+        + 0.20 * intent_accuracy
+        - 0.20 * business_cost
+        - 0.15 * overresponse
+        - 0.05 * verification_cost
+        - 0.05 * delay
+    )
+
+
+def normalized_safe_utility(
+    utility: float,
+    *,
+    random_utility: float,
+    oracle_utility: float,
+    epsilon: float = 1.0e-8,
+) -> float:
+    """Normalize an aggregate Raw Safe Utility against matched anchors."""
+
+    system = _finite(utility, "utility")
+    random_anchor = _finite(random_utility, "random_utility")
+    oracle_anchor = _finite(oracle_utility, "oracle_utility")
+    stabilizer = _finite(epsilon, "epsilon")
+    if stabilizer <= 0.0:
+        raise ValueError("epsilon must be positive")
+    if oracle_anchor <= random_anchor:
+        raise ValueError("oracle_utility must exceed random_utility")
+    return float(
+        (system - random_anchor)
+        / (oracle_anchor - random_anchor + stabilizer)
+    )
+
+
 def core_utility_manifest(
     config: RecoveryCoreUtilityConfig | None = None,
 ) -> dict[str, Any]:

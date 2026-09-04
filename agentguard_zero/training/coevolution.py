@@ -528,6 +528,7 @@ class RoundLayout:
             "tmcd_v2_pilot_fast_4k8_2k4",
             "tmcd_v24",
             "tmcd_v242",
+            "candidate_min3",
         }:
             raise ValueError(f"unsupported artifact scope: {self.artifact_scope}")
         if not self.experiment_variant or "/" in self.experiment_variant or ".." in self.experiment_variant:
@@ -549,6 +550,7 @@ class RoundLayout:
             "tmcd_v2_pilot_fast_4k8_2k4": "tmcd_v2_pilot_fast_4k8_2k4",
             "tmcd_v24": "tmcd_v24",
             "tmcd_v242": "tmcd_v242",
+            "candidate_min3": "candidate_min3",
         }[self.artifact_scope]
         base = self.root / "data" / tree
         if self.experiment_variant != "full":
@@ -567,6 +569,7 @@ class RoundLayout:
             "tmcd_v2_pilot_fast_4k8_2k4",
             "tmcd_v24",
             "tmcd_v242",
+            "candidate_min3",
         }:
             tree = self.artifact_scope
             base = self.root / "checkpoints" / tree

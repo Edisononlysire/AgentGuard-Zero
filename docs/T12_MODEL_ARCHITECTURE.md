@@ -1,0 +1,108 @@
+# T1/T2 Model Architecture
+
+## 1. Decision Interface
+
+At each step, the environment exposes a public observation and the candidate
+generator constructs legal structured defense actions. The model performs two
+related decisions:
+
+1. select an action family from `observe`, `passive_verification`,
+   `active_probe`, `trust`, and `mitigation`;
+2. rank candidates inside the selected family by expected safe utility.
+
+Task labels, hidden attack state, oracle values, and teacher scores are not
+included in the encoded policy input.
+
+## 2. Encoder
+
+The encoder is Qwen3.5-4B loaded through `transformers.AutoModel`. A rank-16
+LoRA adapter is applied to:
+
+```text
+q_proj, k_proj, v_proj, o_proj,
+gate_proj, up_proj, down_proj
+```
+
+The frozen base architecture is shared. The current T1/T2 expert is initialized
+from the common D0 adapter/head state rather than a later T3/T4 checkpoint.
+
+The implementation creates two textual views:
+
+- a **public-state view** for action-family prediction;
+- a **public-state + candidate view** for candidate utility prediction.
+
+The last non-padding hidden representation is pooled and passed to learned
+heads.
+
+## 3. Heads
+
+The result-producing architecture is `shared_local_long_v1` with the
+`branched_defense` objective. T1/T2 use its local decision branch.
+
+Primary heads:
+
+- state action-family logits;
+- candidate utility;
+- local family and local utility;
+- residual family and utility calibration.
+
+Outcome heads trained by the current `branched_defense` objective include
+information gain, terminal mitigation, business cost, overresponse, final safe
+success, and trajectory safe utility. The source also retains compatibility
+heads for support, belief, uncertainty, probe value, business risk, and safety
+risk; these are not explicit optimization terms in the current T1/T2 run.
+Final action selection remains hierarchical family-then-utility.
+
+The existing `probe_value` head is present but was not explicitly supervised by
+the current `branched_defense` loss. The independent active probing proposal
+activates it with Value-of-Information supervision; that proposed loss was not
+the source of the current result.
+
+## 4. Training Contract
+
+The frozen current run used:
+
+| Item | Value |
+|---|---:|
+| Backbone | Qwen3.5-4B |
+| LoRA rank | 16 |
+| Train candidate sets | 4,000 |
+| Held-out data-development sets | 400 |
+| T1/T2 train split | 2,000 / 2,000 |
+| Epochs | 4 |
+| Optimizer steps | 1,000 |
+| Global batch | 16 |
+| Maximum sequence length | 2,048 |
+| Selection | hierarchical family then utility |
+| ECRG during parameter training | disabled |
+
+The 400 trajectory epoch-selection suite is separate from formal test data.
+Checkpoint selection is lexicographic, led by macro T1/T2 Safe Success.
+
+## 5. Scenario And Supervision Path
+
+```text
+canonical_recovery_group(T1 or T2)
+  -> cyber_grounded_recovery_group_v2
+  -> paired hidden-world execution
+  -> public projection
+  -> robust teacher search
+  -> legal candidate set
+  -> lifecycle-constrained target
+  -> family/stage-balanced train and dev records
+```
+
+The builder records semantic scenario fingerprints, public-state digests,
+candidate-set hashes, group lineage, and train/dev disjointness checks.
+
+## 6. Known Limitation Motivating vNext
+
+The current scenario contract exposes requirement fields that can correlate a
+task state with a particular probe family, and the current teacher contains
+probe preferences tied to those requirements. The existing result is therefore
+evidence for the current AEP policy, but not yet the strongest possible proof
+of task-independent active information gathering.
+
+The vNext design removes those public shortcuts, gives both tasks the same
+probe registry, returns raw delayed evidence from causal mechanisms, and trains
+the teacher to prefer a probe when its Value of Information is positive.

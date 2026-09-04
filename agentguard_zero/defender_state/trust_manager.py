@@ -46,6 +46,16 @@ class ContextualTrustManager:
                 "support_streak": 0,
                 "conflict_streak": 0,
                 "recovery_streak": 0,
+                "observed_claim_count": 0,
+                "support_count": 0,
+                "conflict_count": 0,
+                "recovery_count": 0,
+                "profile_usage_counts": {
+                    "support": 0,
+                    "contradict": 0,
+                    "background": 0,
+                },
+                "recent_profile_events": [],
             }
         return self.source_reputation[source_id]
 
@@ -65,6 +75,9 @@ class ContextualTrustManager:
             public_prior=public_prior,
             time=time,
         )
+        source["observed_claim_count"] = int(
+            source.get("observed_claim_count", 0)
+        ) + 1
         self.claim_trust[event_id] = {
             "event_id": event_id,
             "source_id": source_id,
@@ -323,7 +336,11 @@ class ContextualTrustManager:
                 allowed = evidence_store.independent_count(fresh_refs, time=time) >= 2 and positive > negative
                 reason = "recover_requires_two_independent_supports" if not allowed else "ok"
                 if allowed:
-                    source["alpha"] += min(2.0, positive)
+                    # Recovery is backed by at least two independent roots and
+                    # must be strong enough to reverse a prior contradiction;
+                    # a single-support increment leaves valid corrections in a
+                    # permanently challenged state for low-prior sources.
+                    source["alpha"] += min(3.0, 2.0 * positive)
                     source["recovery_streak"] += 1
                     source["conflict_streak"] = max(0, int(source["conflict_streak"]) - 1)
                     source_reputation_updated = True
@@ -339,6 +356,24 @@ class ContextualTrustManager:
                 if op in credibility_ops:
                     self.applied_trust_evidence.update((source_id, ref) for ref in fresh_refs)
                 source["last_updated_at"] = int(time)
+                if source_reputation_updated:
+                    counter = {
+                        "support": "support_count",
+                        "contradict": "conflict_count",
+                        "recover": "recovery_count",
+                    }.get(op)
+                    if counter:
+                        source[counter] = int(source.get(counter, 0)) + 1
+                    history = list(source.get("recent_profile_events", []) or [])
+                    history.append(
+                        {
+                            "time": int(time),
+                            "op": op,
+                            "event_id": event_id,
+                            "evidence_refs": list(fresh_refs),
+                        }
+                    )
+                    source["recent_profile_events"] = history[-8:]
                 self._refresh_source(source)
                 if event_id and event_id in self.claim_trust:
                     claim = self.claim_trust[event_id]
@@ -374,6 +409,115 @@ class ContextualTrustManager:
     def claim_for(self, event_id: str) -> dict[str, Any] | None:
         value = self.claim_trust.get(str(event_id))
         return copy.deepcopy(value) if value is not None else None
+
+    @staticmethod
+    def _profile_memory_id(source_id: str) -> str:
+        return f"profile:{source_id}"
+
+    def public_profile_memory(self) -> list[dict[str, Any]]:
+        """Return bounded source/profile memory derived only from public evidence.
+
+        Profiles become addressable after at least two observed claims.  This
+        prevents a first-step prior from masquerading as longitudinal memory.
+        """
+
+        rows: list[dict[str, Any]] = []
+        for source_id, source in sorted(self.source_reputation.items()):
+            observed = int(source.get("observed_claim_count", 0))
+            if observed < 2:
+                continue
+            recent = list(source.get("recent_profile_events", []) or [])[-8:]
+            recent_support = sum(item.get("op") in {"support", "recover"} for item in recent)
+            recent_conflicts = sum(item.get("op") == "contradict" for item in recent)
+            recent_total = recent_support + recent_conflicts
+            historical = float(source.get("mean", source.get("prior", 0.5)))
+            recent_accuracy = (
+                float(recent_support / recent_total) if recent_total else historical
+            )
+            if recent_conflicts >= 1 and int(source.get("support_count", 0)) >= 2:
+                phase = "activation"
+            elif int(source.get("support_count", 0)) >= 2:
+                phase = "trust_building"
+            else:
+                phase = "unestablished"
+            if recent_accuracy < historical - 0.15 or recent_conflicts >= 2:
+                trend = "declining"
+            elif recent_accuracy > historical + 0.15:
+                trend = "improving"
+            else:
+                trend = "stable"
+            status = str(source.get("status", "uncertain"))
+            evidence_refs = sorted(
+                {
+                    str(reference)
+                    for event in recent
+                    for reference in event.get("evidence_refs", []) or []
+                    if str(reference)
+                }
+            )
+            rows.append(
+                {
+                    "memory_id": self._profile_memory_id(source_id),
+                    "memory_kind": "source_profile",
+                    "source_id": source_id,
+                    "status": "confirmed" if status == "stable" else "quarantined",
+                    "historical_accuracy": historical,
+                    "recent_accuracy": recent_accuracy,
+                    "observed_claim_count": observed,
+                    "independent_confirmations": int(source.get("support_count", 0)),
+                    "recent_contradictions": recent_conflicts,
+                    "trust_trend": trend,
+                    "suspected_deception_phase": phase,
+                    "last_updated_at": int(source.get("last_updated_at", 0)),
+                    "version": max(1, len(recent)),
+                    "evidence_refs": evidence_refs[-8:],
+                    "usage_counts": copy.deepcopy(
+                        source.get("profile_usage_counts", {}) or {}
+                    ),
+                    "last_used_for_action": copy.deepcopy(
+                        source.get("last_profile_use")
+                    ),
+                }
+            )
+        return rows
+
+    def record_profile_usage(
+        self,
+        usage: Iterable[dict[str, Any]],
+        *,
+        retrieved_ids: set[str],
+        time: int,
+    ) -> list[str]:
+        accepted: list[str] = []
+        by_id = {
+            self._profile_memory_id(source_id): source
+            for source_id, source in self.source_reputation.items()
+        }
+        for item in usage or []:
+            memory_id = str(item.get("memory_id", ""))
+            source = by_id.get(memory_id)
+            if source is None or memory_id not in retrieved_ids:
+                continue
+            role = str(item.get("usage", "background"))
+            used_for = str(item.get("used_for", "belief"))
+            counts = source.setdefault(
+                "profile_usage_counts",
+                {"support": 0, "contradict": 0, "background": 0},
+            )
+            counts[role] = int(counts.get(role, 0)) + 1
+            source["last_profile_use"] = {
+                "time": int(time),
+                "usage": role,
+                "used_for": used_for,
+            }
+            status = str(source.get("status", "uncertain"))
+            valid_support = role == "support" and status == "stable"
+            valid_contradiction = role == "contradict" and status != "stable"
+            if used_for in {"belief", "response", "tool"} and (
+                valid_support or valid_contradiction
+            ):
+                accepted.append(memory_id)
+        return accepted
 
     def public_snapshot(self) -> dict[str, Any]:
         def public_source(source: dict[str, Any]) -> dict[str, Any]:

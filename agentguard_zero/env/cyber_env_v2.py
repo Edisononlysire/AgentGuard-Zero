@@ -21,7 +21,6 @@ from agentguard_zero.schemas.observation_schema_v4 import make_observation_v4
 from agentguard_zero.schemas.scenario_schema_v2 import validate_scenario_v2
 from agentguard_zero.runtime_policy import (
     HIGH_IMPACT_ACTIONS,
-    TARGETED_RESPONSE_ACTIONS,
     TOOL_COSTS,
 )
 from agentguard_zero.tools.business_impact import estimate_business_impact
@@ -97,10 +96,12 @@ class CyberDefenseEnvV2:
         self.oracle_ledger = OracleLedger()
         self.business_cost = 0.0
         self.verification_cost = 0.0
+        self.active_probe_count = 0
         self.high_impact_count = 0
         self.attack_mitigated = False
         self.attack_success = False
         self.last_tool_result: dict[str, Any] | None = None
+        self.business_impact_estimates: list[dict[str, Any]] = []
         self.public_probe_state: list[dict[str, Any]] = []
         self._observed_event_ids: set[str] = set()
         self._observed_internal_events: dict[str, dict[str, Any]] = {}
@@ -265,12 +266,51 @@ class CyberDefenseEnvV2:
         self.trust_manager.advance_time(self.t)
         events = self._register_current_events()
         retrieval = retrieve_memory(self.memory, events, time=self.t)
+        constraints = self.scenario.get("defense_constraints", {})
+        profile_memory = (
+            self.trust_manager.public_profile_memory()
+            if self.state_layer_enabled
+            and constraints.get("require_profile_memory_use_for_mitigation", False)
+            else []
+        )
+        if profile_memory:
+            retrieval["retrieved_profiles"] = copy.deepcopy(profile_memory)
+            retrieval["retrieved_memory_ids"] = list(
+                dict.fromkeys(
+                    list(retrieval.get("retrieved_memory_ids", []) or [])
+                    + [str(row["memory_id"]) for row in profile_memory]
+                )
+            )
         self._last_retrieved_ids = (
             set(retrieval.get("retrieved_memory_ids", []))
             if self.state_layer_enabled
             else set()
         )
-        constraints = self.scenario.get("defense_constraints", {})
+        trust_snapshot = (
+            self.trust_manager.public_snapshot() if self.state_layer_enabled else {}
+        )
+        response_history = [
+            {
+                "time": int(step.get("time", 0)),
+                "action": str(
+                    (step.get("response_result") or {}).get(
+                        "executed_action", "Observe"
+                    )
+                ),
+                "target": str(
+                    (step.get("response_result") or {}).get(
+                        "executed_target", "none"
+                    )
+                ),
+                "authorized": bool(
+                    (step.get("response_result") or {}).get("authorized", False)
+                ),
+                "business_cost": float(
+                    (step.get("response_result") or {}).get("business_cost", 0.0)
+                ),
+            }
+            for step in self.history[-8:]
+        ]
         observation = make_observation_v4(
             time=self.t,
             observed_events=events,
@@ -279,17 +319,77 @@ class CyberDefenseEnvV2:
                 if self.state_layer_enabled
                 else events
             ),
-            trust_snapshot=(self.trust_manager.public_snapshot() if self.state_layer_enabled else {}),
+            trust_snapshot=trust_snapshot,
             memory_retrieval=(retrieval if self.state_layer_enabled else {}),
             public_assets=self._public_assets(),
             remaining_business_budget=float(constraints.get("business_budget", 5.0)) - self.business_cost,
             verification_remaining=float(constraints.get("verification_budget", 4)) - self.verification_cost,
+            active_probe_remaining=max(
+                0,
+                int(
+                    constraints.get(
+                        "active_probe_budget",
+                        constraints.get("verification_budget", 4),
+                    )
+                )
+                - self.active_probe_count,
+            ),
             remaining_high_impact_actions=max(
                 0,
                 int(constraints.get("max_high_impact_actions", 1)) - self.high_impact_count,
             ),
             last_tool_result=self.last_tool_result,
             public_probe_state=(self.public_probe_state if self.state_layer_enabled else []),
+            response_requirements={
+                "memory_use_required_for_mitigation": bool(
+                    constraints.get("require_memory_use_for_mitigation", False)
+                    or constraints.get(
+                        "require_profile_memory_use_for_mitigation", False
+                    )
+                ),
+                "profile_memory_use_required_for_mitigation": bool(
+                    constraints.get(
+                        "require_profile_memory_use_for_mitigation", False
+                    )
+                ),
+                "active_probe_required_for_mitigation": bool(
+                    constraints.get("require_active_probe_for_mitigation", False)
+                ),
+                "trust_update_required_for_mitigation": bool(
+                    constraints.get("require_trust_update_for_mitigation", False)
+                ),
+                "impact_probe_required_for_mitigation": bool(
+                    constraints.get("require_impact_probe_for_mitigation", False)
+                ),
+                "passive_check_required_before_active_probe": bool(
+                    constraints.get(
+                        "require_passive_check_before_active_probe", False
+                    )
+                ),
+            },
+            response_history=response_history,
+            business_impact_memory={
+                "cumulative_business_cost": float(self.business_cost),
+                "cumulative_verification_cost": float(self.verification_cost),
+                "impact_estimate_count": len(self.business_impact_estimates),
+                "cumulative_estimated_cost": sum(
+                    float(row.get("estimated_cost", 0.0))
+                    for row in self.business_impact_estimates
+                ),
+                "impact_estimates": copy.deepcopy(
+                    self.business_impact_estimates[-4:]
+                ),
+                "high_impact_action_count": int(self.high_impact_count),
+                "unauthorized_response_count": sum(
+                    not row["authorized"] and row["action"] != "Observe"
+                    for row in response_history
+                ),
+                "remaining_business_budget": float(
+                    constraints.get("business_budget", 5.0)
+                )
+                - float(self.business_cost),
+                "last_updated_at": int(self.t),
+            },
         )
         assert_public(observation)
         self._observation_cache[self.t] = copy.deepcopy(observation)
@@ -309,6 +409,22 @@ class CyberDefenseEnvV2:
             return {"tool": name, "error": "active_probing_disabled_by_ablation"}
         if name in PASSIVE_VERIFICATION_TOOLS and not self.variant.passive_verification:
             return {"tool": name, "error": "passive_verification_disabled_by_ablation"}
+        active_probe_budget = int(
+            self.scenario.get("defense_constraints", {}).get(
+                "active_probe_budget",
+                self.scenario.get("defense_constraints", {}).get(
+                    "verification_budget", 4
+                ),
+            )
+        )
+        if name in ACTIVE_PROBE_TOOLS and self.active_probe_count >= active_probe_budget:
+            return {
+                "tool": name,
+                "status": "budget_exhausted",
+                "error": "active_probe_budget_exhausted",
+                "executed": False,
+                "cost": 0.0,
+            }
         if name != "None":
             tool_cost = float(TOOL_COSTS.get(name, 1.0))
             budget = float(self.scenario.get("defense_constraints", {}).get("verification_budget", 4.0))
@@ -343,6 +459,8 @@ class CyberDefenseEnvV2:
                 "error": "unknown_event_id",
                 "evidence_created": False,
             }
+        if name in ACTIVE_PROBE_TOOLS:
+            self.active_probe_count += 1
         if name == "LogQuery":
             return project_public(log_query(snapshot, source=args.get("source"), time=args.get("time")))
         if name == "CrossCheck":
@@ -532,6 +650,86 @@ class CyberDefenseEnvV2:
         authorization_reason = authorization.reason
         proposed_action = str(proposed_response.get("action", "Observe"))
         if (
+            proposed_action in MITIGATING_ACTIONS
+            and bool(
+                self.scenario.get("defense_constraints", {}).get(
+                    "require_memory_use_for_mitigation", False
+                )
+            )
+        ):
+            grounded_usage = [
+                row
+                for row in action_packet.get("memory_usage", []) or []
+                if isinstance(row, dict)
+                and str(row.get("memory_id", "")) in self._last_retrieved_ids
+                and str(row.get("used_for", "")) == "response"
+            ]
+            if not grounded_usage:
+                action_authorized = False
+                authorization_reason = "mitigation_requires_retrieved_memory_use"
+        if (
+            proposed_action in MITIGATING_ACTIONS
+            and bool(
+                self.scenario.get("defense_constraints", {}).get(
+                    "require_profile_memory_use_for_mitigation", False
+                )
+            )
+        ):
+            grounded_profile_usage = [
+                row
+                for row in action_packet.get("memory_usage", []) or []
+                if isinstance(row, dict)
+                and str(row.get("memory_id", "")).startswith("profile:")
+                and str(row.get("memory_id", "")) in self._last_retrieved_ids
+                and str(row.get("used_for", "")) == "response"
+            ]
+            if not grounded_profile_usage:
+                action_authorized = False
+                authorization_reason = (
+                    "mitigation_requires_retrieved_profile_memory_use"
+                )
+        if proposed_action in MITIGATING_ACTIONS and bool(
+            self.scenario.get("defense_constraints", {}).get(
+                "require_active_probe_for_mitigation", False
+            )
+        ):
+            if not (
+                bool((self.last_tool_result or {}).get("active_probe", False))
+                or any(
+                    bool((step.get("tool_result") or {}).get("active_probe", False))
+                    for step in self.history
+                )
+            ):
+                action_authorized = False
+                authorization_reason = "mitigation_requires_prior_active_probe"
+        if proposed_action in MITIGATING_ACTIONS and bool(
+            self.scenario.get("defense_constraints", {}).get(
+                "require_trust_update_for_mitigation", False
+            )
+        ):
+            if not any(
+                bool(item.get("committed", False))
+                for step in self.history
+                for item in step.get("trust_events", []) or []
+            ):
+                action_authorized = False
+                authorization_reason = "mitigation_requires_prior_trust_update"
+        if proposed_action in MITIGATING_ACTIONS and bool(
+            self.scenario.get("defense_constraints", {}).get(
+                "require_impact_probe_for_mitigation", False
+            )
+        ):
+            impact_tools = {"BusinessImpactEstimator", "ShadowActionProbe"}
+            if not (
+                str((self.last_tool_result or {}).get("tool", "")) in impact_tools
+                or any(
+                    str((step.get("tool_result") or {}).get("tool", "")) in impact_tools
+                    for step in self.history
+                )
+            ):
+                action_authorized = False
+                authorization_reason = "mitigation_requires_prior_impact_probe"
+        if (
             proposed_action in ACTIVE_PROBE_RESPONSE_ACTIONS
             and not self.variant.active_probing
         ):
@@ -602,10 +800,36 @@ class CyberDefenseEnvV2:
                 trust_manager=self.trust_manager,
                 time=self.t,
             )
+            all_memory_usage = [
+                item
+                for item in action_packet.get("memory_usage", []) or []
+                if isinstance(item, dict)
+                and (
+                    str(item.get("used_for", "belief")) != "response"
+                    or action_authorized
+                )
+            ]
+            profile_usage = [
+                item
+                for item in all_memory_usage
+                if str(item.get("memory_id", "")).startswith("profile:")
+            ]
+            evidence_memory_usage = [
+                item
+                for item in all_memory_usage
+                if not str(item.get("memory_id", "")).startswith("profile:")
+            ]
             accepted_memory = self.memory.record_usage(
-                action_packet.get("memory_usage", []),
+                evidence_memory_usage,
                 retrieved_ids=self._last_retrieved_ids,
                 time=self.t,
+            )
+            accepted_memory.extend(
+                self.trust_manager.record_profile_usage(
+                    profile_usage,
+                    retrieved_ids=self._last_retrieved_ids,
+                    time=self.t,
+                )
             )
         else:
             trust_events = []
@@ -615,6 +839,37 @@ class CyberDefenseEnvV2:
         # Compute the probe after response submission, but only against the
         # frozen pre-response snapshot. Its evidence is unavailable until t+1.
         tool_result = self._execute_tool(action_packet.get("tool_call", {}), snapshot)
+        if (
+            str(tool_result.get("tool", ""))
+            in {"BusinessImpactEstimator", "ShadowActionProbe"}
+            and not tool_result.get("error")
+            and "estimated_cost" in tool_result
+        ):
+            self.business_impact_estimates.append(
+                {
+                    "time": int(self.t),
+                    "tool": str(tool_result.get("tool", "")),
+                    "action": str(tool_result.get("action", "")),
+                    "target": str(
+                        (
+                            (
+                                (action_packet.get("tool_call") or {}).get(
+                                    "args", {}
+                                )
+                                or {}
+                            ).get("action", {})
+                            or {}
+                        ).get("target", "")
+                    ),
+                    "estimated_cost": float(tool_result.get("estimated_cost", 0.0)),
+                    "remaining_business_budget_at_check": float(
+                        self.scenario.get("defense_constraints", {}).get(
+                            "business_budget", 5.0
+                        )
+                    )
+                    - float(self.business_cost),
+                }
+            )
         parent_refs: list[str] = []
         event_id = str(tool_result.get("event_id", ""))
         parent = self.evidence_store.evidence_for_event(event_id) if event_id else None

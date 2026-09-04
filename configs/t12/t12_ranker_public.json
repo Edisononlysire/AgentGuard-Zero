@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "kind": "agentguard_t12_public_method_contract",
+  "status": "current_result_architecture",
+  "scope": {
+    "tasks": ["T1", "T2"],
+    "task_label_in_model_input": false,
+    "hidden_state_in_model_input": false,
+    "teacher_scores_in_model_input": false
+  },
+  "model": {
+    "backbone": "Qwen3.5-4B",
+    "base_weights_distributed": false,
+    "architecture": "shared_local_long_v1",
+    "active_branch": "local",
+    "objective": "branched_defense",
+    "selection_mode": "hierarchical_family_then_utility",
+    "lora_rank": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.0,
+    "lora_targets": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
+    "max_length": 2048
+  },
+  "data": {
+    "train_records": 4000,
+    "dev_records": 400,
+    "train_records_per_task": 2000,
+    "dev_records_per_task": 200,
+    "decision_families": [
+      "observe",
+      "passive_verification",
+      "active_probe",
+      "trust",
+      "mitigation"
+    ],
+    "split_unit": "public_group",
+    "semantic_train_dev_overlap": 0
+  },
+  "optimization": {
+    "epochs": 4,
+    "optimizer_steps": 1000,
+    "global_batch": 16,
+    "per_device_batch": 1,
+    "gradient_accumulation": 4,
+    "lora_learning_rate": 0.000005,
+    "head_learning_rate": 0.0003,
+    "scheduler": "constant",
+    "margin": 0.2,
+    "candidate_forward_chunk_size": 8,
+    "seed": 2026072304
+  },
+  "runtime": {
+    "ecrg_during_parameter_training": false,
+    "save_each_epoch": true,
+    "checkpoint_selection_source": "heldout_t12_dev_400",
+    "formal_test_used_for_selection": false
+  },
+  "vnext_active_probing": {
+    "status": "design_only_not_current_result",
+    "design": "docs/T1_T2_ACTIVE_PROBING_DESIGN_20260904.md",
+    "shared_probe_registry": true,
+    "task_to_probe_mapping": false,
+    "teacher_encourages_positive_voi_probes": true
+  }
+}

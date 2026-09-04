@@ -12,7 +12,7 @@ import copy
 import hashlib
 import json
 import pickle
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from agentguard_zero.env.oracle_v2 import score_trajectory_v2
@@ -37,6 +37,12 @@ TARGETED_ACTIONS = {
     "Restore",
     "Remove",
 }
+ACTIVE_PROBE_TOOLS = {
+    "SourceChallenge",
+    "CanaryProbe",
+    "DecoyProbe",
+    "ShadowActionProbe",
+}
 ACTION_CATEGORIES = (
     "observe",
     "passive_verification",
@@ -45,14 +51,20 @@ ACTION_CATEGORIES = (
     "memory",
     "mitigation",
 )
+PROBE_GROUNDING_TIE_TOLERANCE = 0.05
+PROBE_INFORMATION_SHAPING_WEIGHT = 0.02
+PROBE_GROUNDED_COMMIT_SHAPING_WEIGHT = 0.06
 ACTION_HORIZONS = {category: 3 for category in ACTION_CATEGORIES}
 SHORTLIST_QUOTAS = {
-    "observe": 1,
+    "observe": 2,
     "passive_verification": 3,
     "active_probe": 4,
     "trust": 3,
     "memory": 3,
     "mitigation": 6,
+}
+PUBLIC_ENUMERATION_MIN_QUOTAS = {
+    category: quota + 1 for category, quota in SHORTLIST_QUOTAS.items()
 }
 
 
@@ -101,6 +113,7 @@ class TeacherDecision:
     search_horizon: int
     q_audit: dict[str, float]
     core_q_audit: dict[str, float]
+    outcome_audit: dict[str, dict[str, float | bool]] = field(default_factory=dict)
     hidden_state_in_target: bool = False
 
     def to_audit_dict(self) -> dict[str, Any]:
@@ -125,6 +138,72 @@ class _SearchResult:
     admitted_candidate_count: int
     q_audit: dict[str, float]
     core_q_audit: dict[str, float]
+    outcome_audit: dict[str, dict[str, float | bool]]
+
+
+def _packet_without_memory_usage(packet: Mapping[str, Any]) -> str:
+    value = copy.deepcopy(dict(packet))
+    value["memory_usage"] = []
+    value.pop("memory_use", None)
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _outcome_audit(
+    options: Sequence[_SearchOption],
+) -> dict[str, dict[str, float | bool]]:
+    """Aggregate actual simulator outcomes without exposing raw hidden state."""
+
+    by_memory_free_packet = {
+        _packet_without_memory_usage(option.candidate.packet): option
+        for option in options
+        if not (option.candidate.packet.get("memory_usage") or [])
+    }
+    result: dict[str, dict[str, float | bool]] = {}
+    for option in options:
+        scores = [score_trajectory_v2(world) for world in option.final_worlds]
+        business_costs = []
+        for world, score in zip(option.final_worlds, scores, strict=True):
+            constraints = world.scenario.get("defense_constraints", {}) or {}
+            budget = max(1.0e-6, float(constraints.get("business_budget", 5.0)))
+            business_costs.append(
+                min(1.0, max(0.0, float(score.get("business_cost", 0.0)) / budget))
+            )
+        memory_used = bool(option.candidate.packet.get("memory_usage") or [])
+        counterpart = (
+            by_memory_free_packet.get(_packet_without_memory_usage(option.candidate.packet))
+            if memory_used
+            else None
+        )
+        memory_gain = (
+            float(option.robust_value - counterpart.robust_value)
+            if counterpart is not None
+            else 0.0
+        )
+        result[option.candidate.candidate_id] = {
+            "information_gain": min(
+                (float(score.get("probe_yield", 0.0)) for score in scores),
+                default=0.0,
+            ),
+            "terminal_attack_mitigation": float(
+                all(bool(score.get("attack_mitigated", False)) for score in scores)
+            ),
+            "business_cost": max(business_costs, default=0.0),
+            "overresponse_cost": float(
+                any(bool(score.get("overresponse", False)) for score in scores)
+            ),
+            "memory_dependent_utility_gain": memory_gain,
+            "memory_gain_available": counterpart is not None,
+            "final_safe_success": float(
+                all(bool(score.get("safe_success", False)) for score in scores)
+            ),
+            "trajectory_safe_utility": float(option.robust_value),
+        }
+    return result
 
 
 def canonical_public_json(value: Any) -> str:
@@ -223,9 +302,53 @@ def public_inventory(observation: Mapping[str, Any]) -> PublicInventory:
         if event_id and evidence_id:
             evidence_by_event.setdefault(event_id, []).append(evidence_id)
 
+    event_by_id = {
+        str(item["event_id"]): copy.deepcopy(item) for item in events
+    }
+    def event_projection_priority(item: Mapping[str, Any]) -> tuple[Any, ...]:
+        roots = list(item.get("root_source_ids", []) or [])
+        source_id = str(roots[0] if roots else item.get("source_id", "")).strip()
+        usable_source = bool(source_id and not source_id.startswith("tool:"))
+        content = item.get("content") or {}
+        semantics = content.get("claim_semantics") or {}
+        has_claim = bool(
+            str(content.get("entity_id", "")).strip()
+            and str(semantics.get("object", "")).strip()
+        )
+        return (
+            str(item.get("evidence_origin", "")) != "raw_event",
+            not usable_source,
+            not has_claim,
+            str(item.get("evidence_id", "")),
+        )
+
+    for row in sorted(evidence, key=event_projection_priority):
+        event_id = str(row.get("event_id", "")).strip()
+        if not event_id or event_id in event_by_id:
+            continue
+        content = row.get("content") or {}
+        roots = list(row.get("root_source_ids", []) or [])
+        source_id = str(
+            roots[0]
+            if roots
+            else row.get("source_id", "")
+        ).strip()
+        if source_id.startswith("tool:"):
+            source_id = ""
+        event_by_id[event_id] = {
+            "event_id": event_id,
+            "source_id": source_id,
+            "source": source_id,
+            "entity_id": str(content.get("entity_id", "")),
+            "claim_semantics": copy.deepcopy(
+                content.get("claim_semantics") or {}
+            ),
+            "objective_hint": str(content.get("objective_hint", "")),
+        }
+
     sources = {
         str(item.get("source_id") or item.get("source") or "").strip()
-        for item in events
+        for item in event_by_id.values()
         if str(item.get("source_id") or item.get("source") or "").strip()
     }
     memory_ids = {
@@ -234,7 +357,7 @@ def public_inventory(observation: Mapping[str, Any]) -> PublicInventory:
         if str(item.get("memory_id", "")).strip()
     }
     return PublicInventory(
-        event_ids=tuple(sorted(str(item["event_id"]) for item in events)),
+        event_ids=tuple(sorted(event_by_id)),
         evidence_ids=tuple(sorted(str(item["evidence_id"]) for item in evidence)),
         evidence_by_event={
             key: tuple(sorted(set(values)))
@@ -252,7 +375,7 @@ def public_inventory(observation: Mapping[str, Any]) -> PublicInventory:
             )
         ),
         memory_ids=tuple(sorted(memory_ids)),
-        event_by_id={str(item["event_id"]): copy.deepcopy(item) for item in events},
+        event_by_id=event_by_id,
         asset_by_id={str(item["id"]): copy.deepcopy(item) for item in assets},
     )
 
@@ -323,6 +446,70 @@ def _public_belief(observation: Mapping[str, Any]) -> dict[str, float]:
     # Public claims and tool results are noisy evidence, not truth; the
     # symmetric prior prevents hidden labels from creating one-hot beliefs.
     return {key: shifted[key] / total for key in OBJECTIVE_KEYS}
+
+
+def probe_evidence_trust_operation(evidence: Mapping[str, Any]) -> str:
+    """Map a public probe result to the trust update supported by that result."""
+
+    content = evidence.get("content") or evidence
+    if not isinstance(content, Mapping):
+        return "challenge"
+    signals = {
+        str(content.get("verdict", "")).strip().lower(),
+        str(content.get("consistency_signal", "")).strip().lower(),
+        str(content.get("provenance_signal", "")).strip().lower(),
+    }
+    if content.get("canary_triggered") is True:
+        signals.add("canary_triggered")
+    negative = {
+        "conflict",
+        "suspicious",
+        "anomalous",
+        "challenge_failed",
+        "inconsistent",
+        "weak_conflict",
+        "strong_conflict",
+        "canary_triggered",
+    }
+    positive = {
+        "support",
+        "supported",
+        "plausible",
+        "challenge_passed",
+        "consistent",
+        "weak_support",
+        "strong_support",
+    }
+    has_negative = bool(signals & negative)
+    has_positive = bool(signals & positive)
+    if has_negative and not has_positive:
+        return "contradict"
+    if has_positive and not has_negative:
+        return "support"
+    return "challenge"
+
+
+def public_belief_variants(
+    observation: Mapping[str, Any],
+) -> dict[str, dict[str, float]]:
+    """Return legal belief alternatives derived exclusively from public evidence."""
+
+    posterior = _public_belief(observation)
+    ranked = sorted(OBJECTIVE_KEYS, key=lambda key: (-posterior[key], key))
+    top1 = {
+        key: (0.70 if key == ranked[0] else 0.10)
+        for key in OBJECTIVE_KEYS
+    }
+    top2 = {
+        key: (0.40 if key in ranked[:2] else 0.10)
+        for key in OBJECTIVE_KEYS
+    }
+    return {
+        "uniform": {key: 0.25 for key in OBJECTIVE_KEYS},
+        "public_posterior": posterior,
+        "top1_moderate": top1,
+        "top2_ambiguous": top2,
+    }
 
 
 def _base_packet(observation: Mapping[str, Any]) -> dict[str, Any]:
@@ -412,6 +599,7 @@ def _memory_candidate(
     event: Mapping[str, Any],
     evidence_refs: Sequence[str],
     memory_id: str = "",
+    target_status: str = "quarantined",
 ) -> ActionCandidate:
     packet = _base_packet(observation)
     if operation == "ingest":
@@ -426,7 +614,7 @@ def _memory_candidate(
             },
             "source_ids": [str(event.get("source_id") or event.get("source") or "")],
             "evidence_refs": list(evidence_refs),
-            "target_status": "quarantined",
+            "target_status": target_status,
         }
     else:
         op = {
@@ -440,7 +628,8 @@ def _memory_candidate(
         }
     packet["memory_operations"] = [op]
     packet["evidence_assessment"] = [_assessment(event)]
-    return ActionCandidate("memory", packet, f"memory:{operation}:{memory_id}")
+    label_target = target_status if operation == "ingest" else memory_id
+    return ActionCandidate("memory", packet, f"memory:{operation}:{label_target}")
 
 
 def _candidate_is_public(
@@ -506,7 +695,303 @@ def _candidate_is_public(
             and str(operation.get("memory_id", "")) not in memories
         ):
             return False
+    for usage in packet.get("memory_usage", []) or []:
+        if str(usage.get("memory_id", "")) not in memories:
+            return False
     return True
+
+
+def _select_public_candidate_budget(
+    candidates: Sequence[ActionCandidate],
+    *,
+    max_candidates: int,
+    priority_ids: Sequence[str] = (),
+    observation: Mapping[str, Any] | None = None,
+) -> list[ActionCandidate]:
+    """Apply a deterministic family-balanced budget to public candidates."""
+
+    limit = max(1, int(max_candidates))
+    public_observation = observation or {}
+    observed_entities = {
+        str(item.get("entity_id", "")).strip()
+        for item in public_observation.get("observed_events", []) or []
+        if isinstance(item, Mapping) and str(item.get("entity_id", "")).strip()
+    }
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            item.category,
+            _public_candidate_priority(
+                item,
+                observation=public_observation,
+                observed_entities=observed_entities,
+            ),
+        ),
+    )
+    by_category = {
+        category: [row for row in ordered if row.category == category]
+        for category in ACTION_CATEGORIES
+    }
+    selected: list[ActionCandidate] = []
+    selected_ids: set[str] = set()
+
+    def add(candidate: ActionCandidate) -> bool:
+        if len(selected) >= limit or candidate.candidate_id in selected_ids:
+            return False
+        selected.append(candidate)
+        selected_ids.add(candidate.candidate_id)
+        return True
+
+    # Keep every available action family visible even under a small budget.
+    for category in ACTION_CATEGORIES:
+        if by_category[category]:
+            add(by_category[category][0])
+
+    # The Teacher shortlist needs alternatives within each family. Reserve its
+    # full quota plus one before allocating the remaining budget.
+    while len(selected) < limit:
+        changed = False
+        for category in ACTION_CATEGORIES:
+            current = sum(row.category == category for row in selected)
+            if current >= PUBLIC_ENUMERATION_MIN_QUOTAS[category]:
+                continue
+            candidate = next(
+                (
+                    row
+                    for row in by_category[category]
+                    if row.candidate_id not in selected_ids
+                ),
+                None,
+            )
+            if candidate is not None:
+                changed = add(candidate) or changed
+        if not changed:
+            break
+
+    # Explicit public priorities (in particular use of the latest probe
+    # evidence) are protected after the family minima, so they cannot crowd a
+    # different family back down to a singleton.
+    by_id = {row.candidate_id: row for row in ordered}
+    for candidate_id in priority_ids:
+        candidate = by_id.get(str(candidate_id))
+        if candidate is not None:
+            add(candidate)
+
+    # Fill excess capacity round-robin so a large action family cannot crowd
+    # later families out merely because of lexical category order.
+    while len(selected) < limit:
+        changed = False
+        for category in ACTION_CATEGORIES:
+            candidate = next(
+                (
+                    row
+                    for row in by_category[category]
+                    if row.candidate_id not in selected_ids
+                ),
+                None,
+            )
+            if candidate is not None:
+                changed = add(candidate) or changed
+        if not changed:
+            break
+    return selected
+
+
+def _public_candidate_priority(
+    candidate: ActionCandidate,
+    *,
+    observation: Mapping[str, Any],
+    observed_entities: set[str],
+) -> tuple[Any, ...]:
+    """Rank candidates using public constraints, never hidden outcomes."""
+
+    context = observation.get("defense_context", {}) or {}
+    requirements = context.get("response_requirements", {}) or {}
+    response = candidate.packet.get("response", {}) or {}
+    tool = candidate.packet.get("tool_call", {}) or {}
+    tool_name = str(tool.get("name", ""))
+    tool_args = tool.get("args", {}) or {}
+    event_id = str(tool_args.get("event_id", ""))
+    observed_event_ids = {
+        str(item.get("event_id", ""))
+        for item in observation.get("observed_events", []) or []
+        if isinstance(item, Mapping) and str(item.get("event_id", ""))
+    }
+    latest_tool_result = observation.get("last_tool_result") or {}
+    latest_tool_name = str(latest_tool_result.get("tool", ""))
+    latest_probe_evidence_id = (
+        str(latest_tool_result.get("evidence_id", ""))
+        if bool(latest_tool_result.get("active_probe", False))
+        or latest_tool_name
+        in {"CrossCheck", "ProvenanceCheck", "SourceChallenge", "CanaryProbe"}
+        else ""
+    )
+    evidence_references = {
+        str(reference)
+        for field in ("trust_operations", "memory_operations")
+        for operation in candidate.packet.get(field, []) or []
+        for reference in operation.get("evidence_refs", []) or []
+    }
+    evidence_references.update(
+        map(str, tool_args.get("evidence_ids", []) or [])
+    )
+    latest_probe_grounding_penalty = int(
+        bool(
+            latest_probe_evidence_id
+            and latest_probe_evidence_id not in evidence_references
+        )
+    )
+    target = str(response.get("target", ""))
+    mitigation_order = (
+        {
+            "DeployDecoy": 0,
+            "ShadowBlock": 1,
+            "LimitSession": 2,
+            "Isolate": 3,
+            "Restore": 4,
+            "Remove": 5,
+        }
+        if requirements.get("profile_memory_use_required_for_mitigation")
+        else {
+            "ShadowBlock": 0,
+            "LimitSession": 1,
+            "DeployDecoy": 2,
+            "Isolate": 3,
+            "Restore": 4,
+            "Remove": 5,
+        }
+    )
+    active_tool_penalty = 0
+    if candidate.category == "active_probe":
+        if requirements.get("active_probe_required_for_mitigation"):
+            active_tool_penalty = int(tool_name != "SourceChallenge")
+        elif (
+            requirements.get("profile_memory_use_required_for_mitigation")
+            and any(
+                isinstance(row, Mapping)
+                and str(row.get("memory_kind", "")) == "source_profile"
+                for row in (
+                    ((observation.get("defender_state") or {}).get("memory") or {}).get(
+                        "retrieved_profiles", []
+                    )
+                    or []
+                )
+            )
+            and any(
+                str((row.get("content") or {}).get("tool", ""))
+                in {"BusinessImpactEstimator", "ShadowActionProbe"}
+                for row in observation.get("available_evidence", []) or []
+                if isinstance(row, Mapping)
+            )
+        ):
+            active_tool_penalty = int(
+                tool_name not in {"SourceChallenge", "CanaryProbe"}
+            )
+        elif requirements.get("impact_probe_required_for_mitigation"):
+            active_tool_penalty = int(tool_name != "ShadowActionProbe")
+    memory_use_penalty = int(
+        bool(
+            candidate.category == "mitigation"
+            and requirements.get("memory_use_required_for_mitigation")
+            and not candidate.packet.get("memory_usage")
+        )
+    )
+    profile_memory_use_penalty = int(
+        bool(
+            candidate.category == "mitigation"
+            and requirements.get("profile_memory_use_required_for_mitigation")
+            and not any(
+                str(item.get("memory_id", "")).startswith("profile:")
+                for item in candidate.packet.get("memory_usage", []) or []
+            )
+        )
+    )
+    memory_update_penalty = 0
+    if candidate.category == "memory":
+        memory_rows = [
+            row
+            for bucket in (
+                "retrieved_confirmed",
+                "retrieved_quarantined",
+                "rejected_warnings",
+            )
+            for row in (
+                ((observation.get("defender_state") or {}).get("memory") or {}).get(
+                    bucket, []
+                )
+                or []
+            )
+            if isinstance(row, Mapping)
+        ]
+        operation = (candidate.packet.get("memory_operations") or [{}])[0]
+        operation_name = str(operation.get("op", ""))
+        is_update = bool(
+            operation_name == "ingest"
+            and any(
+                (operation.get("claim") or {}) == (row.get("claim") or {})
+                and set(map(str, operation.get("evidence_refs", []) or []))
+                - set(map(str, row.get("evidence_refs", []) or []))
+                for row in memory_rows
+            )
+        )
+        memory_by_id = {
+            str(row.get("memory_id", "")): row
+            for row in memory_rows
+            if str(row.get("memory_id", ""))
+        }
+        current = memory_by_id.get(str(operation.get("memory_id", "")), {})
+        claim = (
+            (
+                (
+                    ((observation.get("defender_state") or {}).get("trust") or {}).get(
+                        "current_claim_trust", {}
+                    )
+                    or {}
+                ).get(str(operation.get("event_id", "")), {})
+                or {}
+            )
+        )
+        legal_transition = bool(
+            operation_name == "promote"
+            and str(current.get("status", "")) == "quarantined"
+            and str(claim.get("status", "")) == "supported"
+        ) or bool(
+            operation_name == "reject"
+            and str(current.get("status", "")) in {"quarantined", "confirmed"}
+            and str(claim.get("status", "")) == "contradicted"
+        ) or bool(
+            operation_name == "reopen"
+            and str(current.get("status", "")) == "rejected"
+            and str(claim.get("status", "")) in {"challenged", "supported"}
+        )
+        memory_update_penalty = (
+            -1
+            if legal_transition
+            else int(bool(memory_rows) and not is_update)
+        )
+    belief_name_order = {
+        "Observe:public_posterior": 0,
+        "Observe:uniform": 1,
+        "Observe:top1_moderate": 2,
+        "Observe:top2_ambiguous": 3,
+    }
+    return (
+        latest_probe_grounding_penalty,
+        active_tool_penalty,
+        memory_use_penalty,
+        profile_memory_use_penalty,
+        memory_update_penalty,
+        0 if event_id and event_id in observed_event_ids else 1,
+        0 if target and target in observed_entities else 1,
+        (
+            mitigation_order.get(str(response.get("action", "")), 6)
+            if candidate.category == "mitigation"
+            else 0
+        ),
+        belief_name_order.get(candidate.label, 4),
+        candidate.label,
+        candidate.candidate_id,
+    )
 
 
 def enumerate_public_candidates(
@@ -515,18 +1000,64 @@ def enumerate_public_candidates(
     max_candidates: int = 96,
 ) -> list[ActionCandidate]:
     inventory = public_inventory(observation)
-    candidates: list[ActionCandidate] = [
-        ActionCandidate(
-            "observe",
-            _base_packet(observation),
-            "Observe",
+    active_probe_evidence_by_event: dict[str, list[str]] = {}
+    probe_trust_operation_by_evidence: dict[str, str] = {}
+    for evidence in observation.get("available_evidence", []) or []:
+        if not isinstance(evidence, Mapping):
+            continue
+        content = evidence.get("content") or {}
+        if (
+            isinstance(content, Mapping)
+            and str(content.get("tool", ""))
+            in {
+                "CrossCheck",
+                "ProvenanceCheck",
+                "SourceChallenge",
+                "CanaryProbe",
+                "DecoyProbe",
+                "ShadowActionProbe",
+            }
+        ):
+            event_id = str(evidence.get("event_id", ""))
+            evidence_id = str(evidence.get("evidence_id", ""))
+            if event_id and evidence_id:
+                active_probe_evidence_by_event.setdefault(event_id, []).append(
+                    evidence_id
+                )
+                probe_trust_operation_by_evidence[evidence_id] = (
+                    probe_evidence_trust_operation(evidence)
+                )
+    candidates: list[ActionCandidate] = []
+    for belief_name, belief in public_belief_variants(observation).items():
+        packet = _base_packet(observation)
+        packet["belief"] = copy.deepcopy(belief)
+        packet["uncertainty"] = 1.0 - max(belief.values())
+        candidates.append(
+            ActionCandidate(
+                "observe",
+                packet,
+                f"Observe:{belief_name}",
+            )
         )
-    ]
 
     for event_id in inventory.event_ids:
         event = inventory.event_by_id[event_id]
         source = str(event.get("source_id") or event.get("source") or "")
         evidence_refs = inventory.evidence_by_event.get(event_id, ())
+        claim_semantics = event.get("claim_semantics", {}) or {}
+        claim_evidence_refs = tuple(
+            sorted(
+                {
+                    evidence_id
+                    for other_event_id, other_event in inventory.event_by_id.items()
+                    if (other_event.get("claim_semantics", {}) or {})
+                    == claim_semantics
+                    for evidence_id in inventory.evidence_by_event.get(
+                        other_event_id, ()
+                    )
+                }
+            )
+        )
         if source:
             candidates.append(
                 _tool_candidate(
@@ -546,7 +1077,9 @@ def enumerate_public_candidates(
                     name="CrossCheck",
                     args={
                         "event_id": event_id,
-                        "evidence_ids": list(evidence_refs[:6]),
+                        "evidence_ids": list(
+                            (claim_evidence_refs or evidence_refs)[:6]
+                        ),
                     },
                     response_action="CrossCheck",
                     response_target=event_id,
@@ -588,7 +1121,20 @@ def enumerate_public_candidates(
                         observation,
                         operation=operation,
                         event=event,
-                        evidence_refs=evidence_refs[:6],
+                        evidence_refs=(claim_evidence_refs or evidence_refs)[:6],
+                    )
+                )
+            for probe_evidence_id in sorted(
+                set(active_probe_evidence_by_event.get(event_id, []))
+            ):
+                candidates.append(
+                    _trust_candidate(
+                        observation,
+                        operation=probe_trust_operation_by_evidence.get(
+                            probe_evidence_id, "challenge"
+                        ),
+                        event=event,
+                        evidence_refs=(probe_evidence_id,),
                     )
                 )
             semantics = event.get("claim_semantics", {}) or {}
@@ -596,14 +1142,16 @@ def enumerate_public_candidates(
                 str(semantics.get(key, "")).strip()
                 for key in ("entity_id", "predicate", "object", "scope")
             ):
-                candidates.append(
-                    _memory_candidate(
-                        observation,
-                        operation="ingest",
-                        event=event,
-                        evidence_refs=evidence_refs[:6],
+                for target_status in ("quarantined", "confirmed"):
+                    candidates.append(
+                        _memory_candidate(
+                            observation,
+                            operation="ingest",
+                            event=event,
+                            evidence_refs=evidence_refs[:6],
+                            target_status=target_status,
+                        )
                     )
-                )
             for memory_id in inventory.memory_ids:
                 for operation in ("promote", "demote", "reject", "reopen"):
                     candidates.append(
@@ -611,7 +1159,7 @@ def enumerate_public_candidates(
                             observation,
                             operation=operation,
                             event=event,
-                            evidence_refs=evidence_refs[:6],
+                            evidence_refs=(claim_evidence_refs or evidence_refs)[:6],
                             memory_id=memory_id,
                         )
                     )
@@ -678,33 +1226,111 @@ def enumerate_public_candidates(
             )
         )
 
+    memory_status: dict[str, str] = {}
+    memory_blob = (observation.get("defender_state", {}) or {}).get("memory", {}) or {}
+    for row in _walk_dicts(memory_blob):
+        memory_id = str(row.get("memory_id", ""))
+        if memory_id:
+            memory_status[memory_id] = str(row.get("status", "quarantined"))
+    observed_entities = {
+        str(item.get("entity_id", ""))
+        for item in observation.get("observed_events", []) or []
+        if isinstance(item, Mapping) and str(item.get("entity_id", ""))
+    }
+    combinable = sorted(
+        [
+        row
+        for row in candidates
+        if row.category in {"passive_verification", "active_probe", "mitigation"}
+        ],
+        key=lambda row: (
+            row.category,
+            _public_candidate_priority(
+                row,
+                observation=observation,
+                observed_entities=observed_entities,
+            ),
+        ),
+    )
+    for memory_id in inventory.memory_ids:
+        role = "support" if memory_status.get(memory_id) == "confirmed" else "contradict"
+        per_category: dict[str, int] = {}
+        for base in combinable:
+            if per_category.get(base.category, 0) >= (4 if base.category == "mitigation" else 2):
+                continue
+            packet = copy.deepcopy(base.packet)
+            packet["memory_usage"] = [
+                {
+                    "memory_id": memory_id,
+                    "usage": role,
+                    "used_for": "response" if base.category == "mitigation" else "tool",
+                }
+            ]
+            candidates.append(
+                ActionCandidate(
+                    base.category,
+                    packet,
+                    f"memory_use:{memory_id}+{base.label}",
+                )
+            )
+            per_category[base.category] = per_category.get(base.category, 0) + 1
+
+    trust_packets = [
+        row for row in candidates if row.category == "trust" and row.packet.get("trust_operations")
+    ]
+    probe_packets = [row for row in candidates if row.category == "active_probe"]
+    for trust in trust_packets[:2]:
+        for probe in probe_packets[:3]:
+            packet = copy.deepcopy(probe.packet)
+            packet["trust_operations"] = copy.deepcopy(trust.packet["trust_operations"])
+            packet["evidence_assessment"] = copy.deepcopy(
+                trust.packet.get("evidence_assessment", [])
+            )
+            candidates.append(
+                ActionCandidate(
+                    "active_probe",
+                    packet,
+                    f"trust_probe:{trust.label}+{probe.label}",
+                )
+            )
+
     deduped: dict[str, ActionCandidate] = {}
     for candidate in candidates:
         if _candidate_is_public(candidate, inventory):
             deduped.setdefault(candidate.candidate_id, candidate)
 
-    # Preserve all action classes before filling the remaining deterministic
-    # budget. This avoids a long event list crowding out mitigation or state
-    # operations.
-    ordered = sorted(
-        deduped.values(),
-        key=lambda item: (item.category, item.label, item.candidate_id),
+    active_probe_evidence_ids = {
+        evidence_id
+        for values in active_probe_evidence_by_event.values()
+        for evidence_id in values
+    }
+    latest_probe_evidence_id = str(
+        (observation.get("last_tool_result") or {}).get("evidence_id", "")
     )
-    selected: list[ActionCandidate] = []
-    for category in (
-        "observe",
-        "passive_verification",
-        "active_probe",
-        "trust",
-        "memory",
-        "mitigation",
-    ):
-        first = next((item for item in ordered if item.category == category), None)
-        if first is not None:
-            selected.append(first)
-    selected_ids = {item.candidate_id for item in selected}
-    selected.extend(item for item in ordered if item.candidate_id not in selected_ids)
-    return selected[: max(1, int(max_candidates))]
+    grounded_priority: list[tuple[int, str]] = []
+    for item in deduped.values():
+        if item.category != "trust":
+            continue
+        references = {
+            str(reference)
+            for operation in item.packet.get("trust_operations", []) or []
+            for reference in operation.get("evidence_refs", []) or []
+        }
+        if references & active_probe_evidence_ids:
+            grounded_priority.append(
+                (
+                    0 if latest_probe_evidence_id in references else 1,
+                    item.candidate_id,
+                )
+            )
+    return _select_public_candidate_budget(
+        list(deduped.values()),
+        max_candidates=max_candidates,
+        priority_ids=[
+            candidate_id for _, candidate_id in sorted(grounded_priority)
+        ],
+        observation=observation,
+    )
 
 
 def admitted_public_candidates(
@@ -744,10 +1370,6 @@ def _simulate_one_step(env: Any, candidate: ActionCandidate) -> Any | None:
     if _environment_fingerprint(env) != before:
         raise RuntimeError("teacher simulation mutated the source environment")
     step = cloned.history[-1]
-    response = step.get("response_result", {}) or {}
-    proposed = str(response.get("proposed_action", "Observe"))
-    if proposed != "Observe" and bool(response.get("blocked", False)):
-        return None
     tool = candidate.packet.get("tool_call", {}) or {}
     if str(tool.get("name", "None")) != "None":
         result = step.get("tool_result", {}) or {}
@@ -774,6 +1396,24 @@ def teacher_rollout_shaping(env: Any) -> float:
     probe_information = float(
         bool((getattr(env, "last_tool_result", {}) or {}).get("evidence_id"))
     )
+    belief_calibration_values = []
+    for step in env.history:
+        observation = step.get("observation") or {}
+        packet = step.get("action_packet") or {}
+        belief = packet.get("belief") or {}
+        if not isinstance(observation, Mapping) or not isinstance(belief, Mapping):
+            continue
+        posterior = _public_belief(observation)
+        total_variation = 0.5 * sum(
+            abs(float(belief.get(key, 0.0)) - posterior[key])
+            for key in OBJECTIVE_KEYS
+        )
+        belief_calibration_values.append(max(0.0, min(1.0, 1.0 - total_variation)))
+    public_belief_calibration = (
+        sum(belief_calibration_values) / len(belief_calibration_values)
+        if belief_calibration_values
+        else 0.0
+    )
     state_commits = sum(
         int(bool(item.get("committed", False)))
         for step in env.history
@@ -788,18 +1428,49 @@ def teacher_rollout_shaping(env: Any) -> float:
             float(score.get("state_reward_component", 0.0)) / 0.25,
         ),
     )
+    probe_grounded_state_commit = False
+    for step in env.history:
+        if not any(
+            bool(item.get("committed", False))
+            for key in ("trust_events", "memory_events")
+            for item in step.get(key, []) or []
+            if isinstance(item, dict)
+        ):
+            continue
+        packet = step.get("action_packet") or {}
+        references = {
+            str(reference)
+            for key in ("trust_operations", "memory_operations")
+            for operation in packet.get(key, []) or []
+            if isinstance(operation, Mapping)
+            for reference in operation.get("evidence_refs", []) or []
+        }
+        for reference in references:
+            record = env.evidence_store.get(reference)
+            tool = str((record or {}).get("public_payload", {}).get("tool", ""))
+            if tool in ACTIVE_PROBE_TOOLS:
+                probe_grounded_state_commit = True
+                break
+        if probe_grounded_state_commit:
+            break
     # Shaping is intentionally bounded to 25% of one mitigation outcome.  It
     # may break ties among partial trajectories, but cannot replace U_core.
     return float(
-        0.13 * pressure_reduction
-        + 0.02 * float(bool(score.get("correct_intent", False)))
-        + 0.03 * probe_information
+        0.09 * pressure_reduction
+        + 0.01 * float(bool(score.get("correct_intent", False)))
+        + 0.01 * public_belief_calibration
+        # Merely receiving a probe result is weaker evidence of longitudinal
+        # skill than grounding a committed trust/memory transition in it. The
+        # two weights still consume the same 0.08 shaping budget as v1.
+        + PROBE_INFORMATION_SHAPING_WEIGHT * probe_information
         + 0.01 * min(1.0, float(score.get("probe_yield", 0.0)))
         # Reward only offline-validated state quality. A committed but harmful
         # trust/memory transition receives negative shaping; a correct one may
         # clear the 0.05 action threshold after public evidence disambiguates
         # the matched worlds.
-        + 0.06 * min(1, state_commits) * state_quality
+        + 0.05 * min(1, state_commits) * state_quality
+        + PROBE_GROUNDED_COMMIT_SHAPING_WEIGHT
+        * float(probe_grounded_state_commit)
     )
 
 
@@ -820,6 +1491,9 @@ class PublicStateRobustTeacher:
         min_worlds_per_public_state: int = 2,
         beam_width: int = 20,
         max_candidates: int = 96,
+        allowed_categories: Sequence[str] | None = None,
+        disabled_skills: Sequence[str] = (),
+        core_tolerance: float = 0.02,
     ) -> None:
         if advantage_delta < 0.0:
             raise ValueError("advantage_delta must be non-negative")
@@ -834,6 +1508,16 @@ class PublicStateRobustTeacher:
         self.beam_width = int(beam_width)
         self.continuation_beam_width = min(8, self.beam_width)
         self.max_candidates = max(1, int(max_candidates))
+        self.allowed_categories = frozenset(allowed_categories or ACTION_CATEGORIES)
+        self.disabled_skills = frozenset(map(str, disabled_skills))
+        if "observe" not in self.allowed_categories:
+            raise ValueError("core-first teacher always requires Observe")
+        unknown = self.allowed_categories.difference(ACTION_CATEGORIES)
+        if unknown:
+            raise ValueError(f"unknown teacher action categories: {sorted(unknown)}")
+        if core_tolerance < 0.0:
+            raise ValueError("core_tolerance must be non-negative")
+        self.core_tolerance = float(core_tolerance)
 
     @staticmethod
     def _candidate_family(candidate: ActionCandidate) -> str:
@@ -848,6 +1532,7 @@ class PublicStateRobustTeacher:
         *,
         continuation_mode: bool,
         observation: Mapping[str, Any],
+        priority_ids: Sequence[str] = (),
     ) -> list[ActionCandidate]:
         """Choose a public-only diverse pool before expensive world cloning.
 
@@ -870,38 +1555,26 @@ class PublicStateRobustTeacher:
             if all(row.candidate_id != candidate.candidate_id for row in selected):
                 selected.append(candidate)
 
+        by_id = {row.candidate_id: row for row in candidates}
+        if not continuation_mode:
+            for candidate_id in priority_ids:
+                candidate = by_id.get(str(candidate_id))
+                if candidate is not None:
+                    add(candidate)
+
         observed_entities = {
             str(item.get("entity_id", "")).strip()
             for item in observation.get("observed_events", []) or []
             if isinstance(item, dict) and str(item.get("entity_id", "")).strip()
         }
         for category in ACTION_CATEGORIES:
-
-            def public_priority(row: ActionCandidate) -> tuple[Any, ...]:
-                response = row.packet.get("response", {}) or {}
-                target = str(response.get("target", ""))
-                mitigation_order = {
-                    "ShadowBlock": 0,
-                    "LimitSession": 1,
-                    "DeployDecoy": 2,
-                    "Restore": 3,
-                    "Remove": 4,
-                    "Isolate": 5,
-                }
-                return (
-                    0 if target in observed_entities else 1,
-                    (
-                        mitigation_order.get(str(response.get("action", "")), 0)
-                        if row.category == "mitigation"
-                        else 0
-                    ),
-                    row.label,
-                    row.candidate_id,
-                )
-
             rows = sorted(
                 (row for row in candidates if row.category == category),
-                key=public_priority,
+                key=lambda row: _public_candidate_priority(
+                    row,
+                    observation=observation,
+                    observed_entities=observed_entities,
+                ),
             )
             quota = 1 if continuation_mode else SHORTLIST_QUOTAS[category] + 1
             families: set[str] = set()
@@ -948,6 +1621,8 @@ class PublicStateRobustTeacher:
     def _shortlist(
         self,
         options: Sequence[_SearchOption],
+        *,
+        priority_ids: Sequence[str] = (),
     ) -> list[_SearchOption]:
         ranked = sorted(
             options,
@@ -962,6 +1637,12 @@ class PublicStateRobustTeacher:
             ):
                 return
             selected.append(item)
+
+        by_id = {row.candidate.candidate_id: row for row in options}
+        for candidate_id in priority_ids:
+            item = by_id.get(str(candidate_id))
+            if item is not None:
+                add(item)
 
         # First preserve a diverse set inside every class.  Candidate labels
         # encode the tool/operation/mitigation family before the final target.
@@ -1049,6 +1730,7 @@ class PublicStateRobustTeacher:
         *,
         enforce_min_worlds: bool,
         continuation_mode: bool = False,
+        priority_candidates: Sequence[ActionCandidate] = (),
     ) -> _SearchResult:
         if enforce_min_worlds and len(worlds) < self.min_worlds:
             raise ValueError(
@@ -1060,11 +1742,59 @@ class PublicStateRobustTeacher:
             observation,
             max_candidates=self.max_candidates,
         )
+        if not continuation_mode and priority_candidates:
+            by_id = {row.candidate_id: row for row in public_candidates}
+            for candidate in priority_candidates:
+                if candidate.category not in ACTION_CATEGORIES:
+                    raise ValueError(
+                        f"unknown priority candidate category: {candidate.category}"
+                    )
+                assert_public(candidate.packet)
+                valid, reason = validate_action_packet_v4(candidate.packet)
+                if not valid:
+                    raise ValueError(
+                        f"invalid public priority candidate: {reason}"
+                    )
+                by_id.setdefault(candidate.candidate_id, candidate)
+            public_candidates = list(by_id.values())
+        public_candidates = [
+            row for row in public_candidates if row.category in self.allowed_categories
+        ]
+        if "active_probe" in self.disabled_skills:
+            public_candidates = [
+                row for row in public_candidates if row.category != "active_probe"
+            ]
+        if "trust" in self.disabled_skills:
+            public_candidates = [
+                row
+                for row in public_candidates
+                if row.category != "trust" and not row.packet.get("trust_operations")
+            ]
+        if "memory" in self.disabled_skills:
+            public_candidates = [
+                row
+                for row in public_candidates
+                if row.category != "memory"
+                and not row.packet.get("memory_operations")
+                and not row.packet.get("memory_usage")
+            ]
+        if "business_response" in self.disabled_skills:
+            public_candidates = [
+                row
+                for row in public_candidates
+                if str((row.packet.get("tool_call") or {}).get("name", ""))
+                not in {"BusinessImpactEstimator", "ShadowActionProbe"}
+            ]
         immediate: list[_SearchOption] = []
         candidate_pool = self._candidate_pool(
             public_candidates,
             continuation_mode=continuation_mode,
             observation=observation,
+            priority_ids=(
+                tuple(row.candidate_id for row in priority_candidates)
+                if not continuation_mode
+                else ()
+            ),
         )
         for candidate in candidate_pool:
             next_worlds = self._simulate_candidate(worlds, candidate)
@@ -1087,7 +1817,14 @@ class PublicStateRobustTeacher:
             raise RuntimeError("public teacher found no commonly admitted action")
 
         completed: list[_SearchOption] = []
-        for option in self._shortlist(immediate):
+        for option in self._shortlist(
+            immediate,
+            priority_ids=(
+                tuple(row.candidate_id for row in priority_candidates)
+                if not continuation_mode
+                else ()
+            ),
+        ):
             option_horizon = min(horizon, ACTION_HORIZONS[option.candidate.category])
             final_worlds = (
                 self._continue_groups(option.final_worlds, option_horizon - 1)
@@ -1107,16 +1844,71 @@ class PublicStateRobustTeacher:
                     ),
                 )
             )
-        observe = next(
-            item for item in completed if item.candidate.category == "observe"
-        )
-        best = max(
-            completed,
+        observe = max(
+            (
+                item
+                for item in completed
+                if item.candidate.category == "observe"
+            ),
             key=lambda item: (item.robust_value, item.candidate.candidate_id),
         )
+        core_eligible = [
+            item
+            for item in completed
+            if item.core_value >= observe.core_value - self.core_tolerance - 1.0e-12
+        ]
+        best = max(
+            core_eligible,
+            key=lambda item: (item.robust_value, item.candidate.candidate_id),
+        )
+        last_tool_result = observation.get("last_tool_result") or {}
+        consume_grounded_probe = False
+        if bool(last_tool_result.get("active_probe", False)):
+            latest_probe_evidence_id = str(
+                last_tool_result.get("evidence_id", "")
+            )
+            probe_evidence_ids = (
+                {latest_probe_evidence_id} if latest_probe_evidence_id else set()
+            )
+            grounded = []
+            for item in core_eligible:
+                references = {
+                    str(reference)
+                    for operation in item.candidate.packet.get(
+                        "trust_operations", []
+                    )
+                    or []
+                    for reference in operation.get("evidence_refs", []) or []
+                }
+                if (
+                    references & probe_evidence_ids
+                    and item.core_value + self.core_tolerance >= best.core_value
+                    and item.robust_value + PROBE_GROUNDING_TIE_TOLERANCE
+                    >= best.robust_value
+                ):
+                    grounded.append(item)
+            if grounded:
+                best = max(
+                    grounded,
+                    key=lambda item: (
+                        item.robust_value,
+                        item.candidate.candidate_id,
+                    ),
+                )
+                # A probe is only useful if its new public evidence is consumed.
+                # Do not let the generic action-advantage threshold replace a
+                # grounded, core-safe action with Observe when that action has
+                # no lower trajectory utility than Observe.
+                consume_grounded_probe = (
+                    best.robust_value + 1.0e-12 >= observe.robust_value
+                )
         # Equality belongs to Observe.  The tolerance prevents a nominal
         # 0.05 advantage from becoming active only because of float rounding.
-        if best.robust_value <= observe.robust_value + self.advantage_delta + 1.0e-12:
+        if consume_grounded_probe:
+            selected = best
+        elif best.robust_value <= (
+            observe.robust_value + self.advantage_delta + 1.0e-12
+        ):
             selected = observe
         else:
             selected = best
@@ -1133,6 +1925,7 @@ class PublicStateRobustTeacher:
                 item.candidate.candidate_id: float(item.core_value)
                 for item in completed
             },
+            outcome_audit=_outcome_audit(completed),
         )
 
     def decide(
@@ -1141,6 +1934,7 @@ class PublicStateRobustTeacher:
         *,
         horizon: int = 3,
         enforce_min_worlds: bool = True,
+        priority_candidates: Sequence[ActionCandidate] = (),
     ) -> TeacherDecision:
         if horizon != 3:
             raise ValueError("formal teacher root horizon must equal 3")
@@ -1149,6 +1943,7 @@ class PublicStateRobustTeacher:
             worlds,
             horizon,
             enforce_min_worlds=enforce_min_worlds,
+            priority_candidates=priority_candidates,
         )
         selected = result.selected
         observe = result.observe
@@ -1168,4 +1963,5 @@ class PublicStateRobustTeacher:
             search_horizon=int(horizon),
             q_audit=result.q_audit,
             core_q_audit=result.core_q_audit,
+            outcome_audit=result.outcome_audit,
         )

@@ -79,7 +79,10 @@ class HiddenWorld:
         self.phase_index = 0
         self.ticks = 0
         self.phase_duration = max(1, math.ceil(max(1, int(horizon)) / max(1, len(self.phase_schedule))))
-        self.attack_pressure = 1.0
+        self.attack_pressure = max(
+            0.05,
+            min(1.0, float(attack.get("initial_pressure", 1.0))),
+        )
         self.mitigated = False
         self.succeeded = False
         self.response_history: list[dict[str, Any]] = []

@@ -177,7 +177,10 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
         or excess_severity > 0.0
     )
     invalid_state_ops = sum(
-        int(not item.get("committed", False))
+        int(
+            not item.get("committed", False)
+            or bool(item.get("fallback", False))
+        )
         for step in env.history
         for key in ("trust_events", "memory_events")
         for item in step.get(key, [])
