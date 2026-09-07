@@ -11,8 +11,29 @@ The focused tasks are:
 
 The release includes the public-state candidate ranker, T1/T2 scenario
 generator, robust teacher, data construction, frozen training/evaluation
-contracts, and tests. It intentionally excludes model weights, LoRA adapters,
-generated datasets, logs, credentials, scheduler outputs, and result tables.
+contracts, tests, and an audited aggregate-only historical results snapshot.
+It intentionally excludes model weights, LoRA adapters, generated datasets,
+raw trajectories, logs, credentials, and scheduler outputs.
+
+## Latest Plan And Existing Results
+
+- **[新版整体规划（中文，2026-09-07）](docs/T12_OVERALL_PLAN_20260907.md)**:
+  revised active probing, public-information teacher, ECRG, data boundaries,
+  matched baselines, causal tests, external investigation transfer, and delivery.
+- **[现有 T1/T2 结果（中文，2026-09-07）](docs/T12_CURRENT_RESULTS_20260907.md)**:
+  verified counts, all four development epochs, probe usage, and limitations.
+- **[Machine-readable historical results](results/t12_legacy_retention_20260907.json)**:
+  aggregate counts and source hashes, without private paths or raw traces.
+
+| Historical T12, ECRG disabled | Safe Success | Attack Mitigation |
+|---|---:|---:|
+| T1 | 50/150 (33.33%) | 65/150 (43.33%) |
+| T2 | 100/150 (66.67%) | 132/150 (88.00%) |
+
+These are **legacy development/retention results**, not untouched final tests
+for the new protocol. The original retention gate **did not pass**, including
+overresponse and intent-retention checks. No vNext causal-probing or T12+ECRG
+gain is claimed. Read the results page for negative evidence and denominators.
 
 ## Release Status
 
@@ -21,7 +42,7 @@ Two method states are kept separate:
 1. **Current T1/T2 model**: the architecture and data path that produced the
    existing T1/T2 result. It uses a Qwen3.5-4B LoRA candidate ranker with
    hierarchical action-family and candidate-utility selection.
-2. **Independent active probing vNext**: a frozen design proposal. It removes
+2. **Independent active probing vNext**: a revised design proposal. It removes
    task-to-probe shortcuts, gives T1 and T2 the same probe registry, produces
    delayed raw observations through causal simulator mechanisms, and teaches
    probing through value of information. It has not yet produced the current
@@ -31,7 +52,9 @@ See:
 
 - [`docs/T12_MODEL_ARCHITECTURE.md`](docs/T12_MODEL_ARCHITECTURE.md)
 - [`docs/T12_RELEASE_SCOPE.md`](docs/T12_RELEASE_SCOPE.md)
+- [`docs/T12_OVERALL_PLAN_20260907.md`](docs/T12_OVERALL_PLAN_20260907.md)
 - [`docs/T1_T2_ACTIVE_PROBING_DESIGN_20260904.md`](docs/T1_T2_ACTIVE_PROBING_DESIGN_20260904.md)
+  (superseded proposal, retained for provenance)
 
 ## Current T1/T2 Pipeline
 
@@ -75,6 +98,7 @@ public projector is the model-input boundary.
 | `scripts/eval_v11_single_expert_policy.py` | single-expert trajectory evaluation |
 | `configs/t12/t12_ranker_public.json` | portable description of the frozen model/training contract |
 | `scripts/smoke_t12_scenarios.py` | CPU smoke for T1/T2 scenario generation and leakage checks |
+| `results/t12_legacy_retention_20260907.json` | audited aggregate historical evidence, not new-protocol results |
 
 ## Quick Start
 
@@ -102,21 +126,28 @@ portable source release.
 
 ## Active Probing vNext
 
-T1 and T2 will share four probes:
+T1 and T2 will share four tool interfaces:
 
 - `AttestationChallenge` (`SourceChallenge` compatibility alias);
 - `SensorCanaryProbe` (`CanaryProbe` alias);
 - `DecoyInteractionProbe` (`DecoyProbe` alias);
 - `ShadowEnforcementProbe` (`ShadowActionProbe` alias).
 
-The teacher will actively create and supervise probe-beneficial states, but a
-probe receives positive credit only when it has positive information value or
-causally improves the later trust/response decision. No task ID or
-`require_*_probe` field may route the model to a probe.
+Canary and decoy are the primary environment interventions. Attestation is
+active source verification; shadow execution estimates response impact. Valid
+authentication is not proof of truth, and raw-looking output fields must not
+encode hidden attack labels.
+
+The teacher will actively cover beneficial probing opportunities while keeping
+the same policy at indistinguishable public histories. Cost is counted once;
+confirmation of a correct decision can be useful without changing the action.
+No task ID or `require_*_probe` field may route the model to a probe. Result
+masking, no-probe rollouts, and result corruption are separate evaluations.
 
 The complete proposed contract, causal mechanisms, data composition, losses,
 counterfactual metrics, and acceptance gates are in
-[`docs/T1_T2_ACTIVE_PROBING_DESIGN_20260904.md`](docs/T1_T2_ACTIVE_PROBING_DESIGN_20260904.md).
+[`docs/T12_OVERALL_PLAN_20260907.md`](docs/T12_OVERALL_PLAN_20260907.md).
+This is a plan, not a claim that the new runtime or training has been implemented.
 
 ## Safety And Reproducibility
 
@@ -125,6 +156,8 @@ counterfactual metrics, and acceptance gates are in
 - Train/dev/test groups must be split by public-group identity.
 - Public policy inputs must pass the hidden-state leakage audit.
 - Checkpoints and data artifacts are hash-bound but excluded from Git.
+- Aggregate results permit table recalculation, not full experiment reproduction
+  without the separately held data and checkpoints.
 - Current results and proposed vNext behavior are never conflated.
 
 ## License
