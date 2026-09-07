@@ -1,0 +1,720 @@
+{
+  "schema_version": 1,
+  "audit_date": "2026-09-07",
+  "status": "legacy_development_retention_evidence_not_new_protocol_final_test",
+  "source_code_release_commit": "f5ef187207c2a7b315fd318ae7efa3f55e48880c",
+  "scope": "T1/T2 subset of three original four-task 200-trajectory suites; 300 hidden trajectories per policy, not 600 T1/T2 trajectories",
+  "checkpoint": {
+    "architecture": "shared_local_long_v1",
+    "objective": "branched_defense",
+    "epoch_index": 2,
+    "completed_epochs": 2,
+    "optimizer_steps": 500,
+    "seed": 2026072304,
+    "adapter_sha256": "1167a56b072033eb7580c63cc5ea983666f601126f52847c3b95329aaf36d580",
+    "heads_sha256": "47ccf92c55f466fdc06f2ad142501cf5b98520231271c607dab11955fd6e8291",
+    "initialization_role": "d0_v11_t12_native_v2",
+    "initialization_manifest_sha256": "44ef5ff8e052394a296400e465feb7edcac1b89a808267368cbda9e5c12bb156",
+    "weight_hash_verification": "Hashes recorded in the original checkpoint manifest; weight files were not read or exported in this audit."
+  },
+  "training": {
+    "architecture": "shared_local_long_v1",
+    "backbone": "Qwen3.5-4B",
+    "epochs": 4,
+    "formal_frozen_600_during_training": false,
+    "global_batch": 16,
+    "inherits_v9_checkpoint": false,
+    "initialization": "common_d0_only",
+    "local_heads_initialized_from_d0_legacy_heads": true,
+    "lora_rank": 16,
+    "memory_tier_encoding": true,
+    "objective": "branched_defense",
+    "optimizer_steps": 1000,
+    "save_each_epoch": true,
+    "selection_mode": "hierarchical_family_then_utility",
+    "training_examples_seen": 16000
+  },
+  "epoch_selection_protocol": {
+    "evaluation_seed": 2026072303,
+    "formal_frozen_600_visible": false,
+    "lexicographic": [
+      "t12_macro_safe_success_desc",
+      "attack_mitigation_desc",
+      "attack_success_asc",
+      "intent_accuracy_desc",
+      "overresponse_asc",
+      "business_cost_asc"
+    ],
+    "scenario_count": 400,
+    "source": "t12_epoch_selection_dev_400_only"
+  },
+  "source_hashes": {
+    "selected_epoch_json": "ca1d784559486068761b2c75a73ead2c12cc0f6420d169af47dd964acbd19c15",
+    "checkpoint_manifest_json": "87f8ed4484727a493791ae2ec534fee6918fa4403b56b5ab31b40b18a90ba119",
+    "training_protocol_json": "83394a013ba424bee99c6fbd4a19ae19ce0784cb3a8633f195b46edcdfd100bc",
+    "retention_gate_json": "24e6ff2501744886d25057e90541543df67e531b579c53a3fbc33c6618648791"
+  },
+  "legacy_retention_gate": {
+    "accepted": false,
+    "failures": [
+      "pooled_overresponse_not_higher",
+      "fair_s1_T2_intent_accuracy_within_one_trajectory",
+      "fair_s1_T2_overresponse_not_higher",
+      "fair_s2_T2_intent_accuracy_within_one_trajectory",
+      "fair_s2_T2_overresponse_not_higher",
+      "fair_s3_T1_overresponse_not_higher",
+      "fair_s3_T2_intent_accuracy_within_one_trajectory",
+      "fair_s3_T2_overresponse_not_higher"
+    ],
+    "note": "Original gate includes four-task pooled checks and T1/T2-specific checks. A false outcome is retained, not overridden."
+  },
+  "evaluations": [
+    {
+      "suite": "fair_s1",
+      "system": "new_t12",
+      "created_at": "2026-07-23T14:47:52.466016Z",
+      "source_artifact": "evaluations/v11_three_expert_router_20260723/t12_retention/fair_s1/new_t12/metrics.json",
+      "source_artifact_sha256": "3966b5598904645f5ee1f9e36cc722f9d30b93a9782a7618f3bdacc624153c10",
+      "scenario_source_sha256": "4d80b03347c38f0aac78ea1c19189d08b47f0cd49073ab4b1a7778082da36b2d",
+      "suite_semantic_sha256": "300fc153dc2f7b138137c378b3172c4a525b13ed4a315de4bac9a997fc879cd4",
+      "expert_manifest_sha256": "87f8ed4484727a493791ae2ec534fee6918fa4403b56b5ab31b40b18a90ba119",
+      "evaluation_seed": 20260911,
+      "ecrg_enabled": false,
+      "dca_frozen": true,
+      "formal_three_rounds_started": false,
+      "candidate_count": 24,
+      "selection_mode": "learned_hierarchical_family_then_utility",
+      "tasks": {
+        "T1": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 15,
+          "attack_mitigation_count": 17,
+          "correct_intent_count": 29,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.31768,
+          "legacy_probe_yield_mean": 0.46,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.3,
+          "public_decision_count": 145,
+          "active_probe_decision_count": 13,
+          "active_probe_types": {
+            "SourceChallenge": 13
+          }
+        },
+        "T2": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 36,
+          "attack_mitigation_count": 43,
+          "correct_intent_count": 43,
+          "overresponse_count": 3,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.56336,
+          "legacy_probe_yield_mean": 0.12,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.02,
+          "public_decision_count": 129,
+          "active_probe_decision_count": 3,
+          "active_probe_types": {
+            "CanaryProbe": 2,
+            "SourceChallenge": 1
+          }
+        }
+      }
+    },
+    {
+      "suite": "fair_s1",
+      "system": "old_v9",
+      "created_at": "2026-07-23T14:53:10.063176Z",
+      "source_artifact": "evaluations/v11_three_expert_router_20260723/t12_retention/fair_s1/old_v9/metrics.json",
+      "source_artifact_sha256": "baca57aed36c15f6050e1d2115b4470b1c3a2518eefa0b3412b68290c07a7943",
+      "scenario_source_sha256": "4d80b03347c38f0aac78ea1c19189d08b47f0cd49073ab4b1a7778082da36b2d",
+      "suite_semantic_sha256": "300fc153dc2f7b138137c378b3172c4a525b13ed4a315de4bac9a997fc879cd4",
+      "expert_manifest_sha256": "a0b409af627659b683a26608a22cdb540fb5081ce672cb1062dd3c51f67d6849",
+      "evaluation_seed": 20260911,
+      "ecrg_enabled": false,
+      "dca_frozen": true,
+      "formal_three_rounds_started": false,
+      "candidate_count": 24,
+      "selection_mode": "learned_hierarchical_family_then_utility",
+      "tasks": {
+        "T1": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 0,
+          "attack_mitigation_count": 1,
+          "correct_intent_count": 2,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.027559999999999998,
+          "legacy_probe_yield_mean": 0.01,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.44,
+          "public_decision_count": 159,
+          "active_probe_decision_count": 2,
+          "active_probe_types": {
+            "SourceChallenge": 1,
+            "CanaryProbe": 1
+          }
+        },
+        "T2": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 1,
+          "attack_mitigation_count": 1,
+          "correct_intent_count": 50,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.01516,
+          "legacy_probe_yield_mean": 0,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0,
+          "public_decision_count": 248,
+          "active_probe_decision_count": 0,
+          "active_probe_types": {}
+        }
+      }
+    },
+    {
+      "suite": "fair_s2",
+      "system": "new_t12",
+      "created_at": "2026-07-23T14:48:07.821701Z",
+      "source_artifact": "evaluations/v11_three_expert_router_20260723/t12_retention/fair_s2/new_t12/metrics.json",
+      "source_artifact_sha256": "26fca5bf31d504d62feea32c8ae2c2734340a5f149590e57529f0008d777fd2a",
+      "scenario_source_sha256": "9fe680f011e05be68c44e6af8cc415002a318e41a2b7b97b749f87aa25049cc4",
+      "suite_semantic_sha256": "c13315694c10fccbce0ea01ec0748b4137fff9907f3d8659013df940458db6dc",
+      "expert_manifest_sha256": "87f8ed4484727a493791ae2ec534fee6918fa4403b56b5ab31b40b18a90ba119",
+      "evaluation_seed": 20260912,
+      "ecrg_enabled": false,
+      "dca_frozen": true,
+      "formal_three_rounds_started": false,
+      "candidate_count": 24,
+      "selection_mode": "learned_hierarchical_family_then_utility",
+      "tasks": {
+        "T1": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 19,
+          "attack_mitigation_count": 22,
+          "correct_intent_count": 34,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.39827999999999997,
+          "legacy_probe_yield_mean": 0.42,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.31,
+          "public_decision_count": 145,
+          "active_probe_decision_count": 17,
+          "active_probe_types": {
+            "SourceChallenge": 17
+          }
+        },
+        "T2": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 29,
+          "attack_mitigation_count": 44,
+          "correct_intent_count": 34,
+          "overresponse_count": 2,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.5846399999999999,
+          "legacy_probe_yield_mean": 0.24,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0,
+          "public_decision_count": 131,
+          "active_probe_decision_count": 6,
+          "active_probe_types": {
+            "SourceChallenge": 1,
+            "CanaryProbe": 5
+          }
+        }
+      }
+    },
+    {
+      "suite": "fair_s2",
+      "system": "old_v9",
+      "created_at": "2026-07-23T14:53:43.736609Z",
+      "source_artifact": "evaluations/v11_three_expert_router_20260723/t12_retention/fair_s2/old_v9/metrics.json",
+      "source_artifact_sha256": "faca1bf3acd7b73c7eb072f9c3a85e880ae331773b8ab51b2ca3cbbe6d9bb93d",
+      "scenario_source_sha256": "9fe680f011e05be68c44e6af8cc415002a318e41a2b7b97b749f87aa25049cc4",
+      "suite_semantic_sha256": "c13315694c10fccbce0ea01ec0748b4137fff9907f3d8659013df940458db6dc",
+      "expert_manifest_sha256": "a0b409af627659b683a26608a22cdb540fb5081ce672cb1062dd3c51f67d6849",
+      "evaluation_seed": 20260912,
+      "ecrg_enabled": false,
+      "dca_frozen": true,
+      "formal_three_rounds_started": false,
+      "candidate_count": 24,
+      "selection_mode": "learned_hierarchical_family_then_utility",
+      "tasks": {
+        "T1": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 0,
+          "attack_mitigation_count": 2,
+          "correct_intent_count": 6,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.06011999999999999,
+          "legacy_probe_yield_mean": 0.006666666666666666,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.34,
+          "public_decision_count": 158,
+          "active_probe_decision_count": 3,
+          "active_probe_types": {
+            "SourceChallenge": 2,
+            "CanaryProbe": 1
+          }
+        },
+        "T2": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 0,
+          "attack_mitigation_count": 0,
+          "correct_intent_count": 50,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.018000000000000002,
+          "legacy_probe_yield_mean": 0,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.02,
+          "public_decision_count": 250,
+          "active_probe_decision_count": 0,
+          "active_probe_types": {}
+        }
+      }
+    },
+    {
+      "suite": "fair_s3",
+      "system": "new_t12",
+      "created_at": "2026-07-23T14:47:36.869449Z",
+      "source_artifact": "evaluations/v11_three_expert_router_20260723/t12_retention/fair_s3/new_t12/metrics.json",
+      "source_artifact_sha256": "573f0eae8ce2803d51955d991b15b73be8fde4d25d45b99bb2dda2a5491382ec",
+      "scenario_source_sha256": "b43fdfbf969eb85cf88495715b5ad1b29c16a087f41f9a969c6386bda621d83c",
+      "suite_semantic_sha256": "7a4a404bf934cfd9cfdbf15936be9baa3e818902e7112e49139a2c5ac12bb42b",
+      "expert_manifest_sha256": "87f8ed4484727a493791ae2ec534fee6918fa4403b56b5ab31b40b18a90ba119",
+      "evaluation_seed": 20260913,
+      "ecrg_enabled": false,
+      "dca_frozen": true,
+      "formal_three_rounds_started": false,
+      "candidate_count": 24,
+      "selection_mode": "learned_hierarchical_family_then_utility",
+      "tasks": {
+        "T1": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 16,
+          "attack_mitigation_count": 26,
+          "correct_intent_count": 35,
+          "overresponse_count": 1,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.42796,
+          "legacy_probe_yield_mean": 0.44,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.31,
+          "public_decision_count": 134,
+          "active_probe_decision_count": 16,
+          "active_probe_types": {
+            "SourceChallenge": 16
+          }
+        },
+        "T2": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 35,
+          "attack_mitigation_count": 45,
+          "correct_intent_count": 39,
+          "overresponse_count": 1,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.60448,
+          "legacy_probe_yield_mean": 0.2,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0,
+          "public_decision_count": 127,
+          "active_probe_decision_count": 5,
+          "active_probe_types": {
+            "CanaryProbe": 5
+          }
+        }
+      }
+    },
+    {
+      "suite": "fair_s3",
+      "system": "old_v9",
+      "created_at": "2026-07-23T14:52:48.585586Z",
+      "source_artifact": "evaluations/v11_three_expert_router_20260723/t12_retention/fair_s3/old_v9/metrics.json",
+      "source_artifact_sha256": "9099c0f3147f2e52731d7be328bd7b78bcbbd38dcf725ef1848708cea3f660b3",
+      "scenario_source_sha256": "b43fdfbf969eb85cf88495715b5ad1b29c16a087f41f9a969c6386bda621d83c",
+      "suite_semantic_sha256": "7a4a404bf934cfd9cfdbf15936be9baa3e818902e7112e49139a2c5ac12bb42b",
+      "expert_manifest_sha256": "a0b409af627659b683a26608a22cdb540fb5081ce672cb1062dd3c51f67d6849",
+      "evaluation_seed": 20260913,
+      "ecrg_enabled": false,
+      "dca_frozen": true,
+      "formal_three_rounds_started": false,
+      "candidate_count": 24,
+      "selection_mode": "learned_hierarchical_family_then_utility",
+      "tasks": {
+        "T1": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 2,
+          "attack_mitigation_count": 2,
+          "correct_intent_count": 9,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.05808,
+          "legacy_probe_yield_mean": 0,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.34,
+          "public_decision_count": 155,
+          "active_probe_decision_count": 1,
+          "active_probe_types": {
+            "SourceChallenge": 1
+          }
+        },
+        "T2": {
+          "scenario_count": 50,
+          "public_group_count": 25,
+          "safe_success_count": 0,
+          "attack_mitigation_count": 0,
+          "correct_intent_count": 50,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "mean_business_cost": 0.014000000000000002,
+          "legacy_probe_yield_mean": 0,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "legacy_betrayal_detection_mean": 0.02,
+          "public_decision_count": 250,
+          "active_probe_decision_count": 0,
+          "active_probe_types": {}
+        }
+      }
+    }
+  ],
+  "verification": {
+    "all_six_original_metrics_hashes_match_retention_gate": true,
+    "scenario_file_hashes_verified": true,
+    "no_T12_terminal_fingerprint_reused_across_suites_per_system": true,
+    "terminal_metrics_recomputed": true,
+    "safe_success_formula_checked_per_terminal": true,
+    "no_training_or_inference_run": true
+  },
+  "development_epoch_selection": {
+    "source_artifact": "evaluations/v11_three_expert_router_20260723/t12_expert/native_t12_v2_d0_hierarchical_local/selected_epoch.json",
+    "source_sha256": "ca1d784559486068761b2c75a73ead2c12cc0f6420d169af47dd964acbd19c15",
+    "selected_epoch": 2,
+    "selection_source": "frozen_t12_epoch_selection_dev_400_only",
+    "epochs": [
+      {
+        "epoch": 1,
+        "metrics": {
+          "by_task": {
+            "T1": {
+              "attack_mitigation": 0.375,
+              "attack_success": 0.625,
+              "business_cost": 0.41377,
+              "intent_accuracy": 0.505,
+              "overresponse": 0.015,
+              "safe_success": 0.275,
+              "scenario_count": 200,
+              "unauthorized_high_impact": 0
+            },
+            "T2": {
+              "attack_mitigation": 0.84,
+              "attack_success": 0.16,
+              "business_cost": 0.61556,
+              "intent_accuracy": 0.74,
+              "overresponse": 0.055,
+              "safe_success": 0.59,
+              "scenario_count": 200,
+              "unauthorized_high_impact": 0
+            }
+          },
+          "overall": {
+            "attack_mitigation": 0.6075,
+            "attack_success": 0.3925,
+            "business_cost": 0.514665,
+            "intent_accuracy": 0.6225,
+            "overresponse": 0.035,
+            "safe_success": 0.4325,
+            "unauthorized_high_impact": 0
+          },
+          "scenario_count": 400,
+          "scenario_count_by_task": {
+            "T1": 200,
+            "T2": 200
+          },
+          "t12_macro_safe_success": 0.4325
+        },
+        "rollout_sha256": "b43e0f715c8d9b460627a0c8020c81422f2339c7115fc12a984571a70d9db53f",
+        "checkpoint_manifest_sha256": "ec411b6fdeb716c2afba889705966584673ead4e931777279d18072788ec4314"
+      },
+      {
+        "epoch": 2,
+        "metrics": {
+          "by_task": {
+            "T1": {
+              "attack_mitigation": 0.39,
+              "attack_success": 0.61,
+              "business_cost": 0.37036,
+              "intent_accuracy": 0.445,
+              "overresponse": 0.015,
+              "safe_success": 0.28,
+              "scenario_count": 200,
+              "unauthorized_high_impact": 0
+            },
+            "T2": {
+              "attack_mitigation": 0.875,
+              "attack_success": 0.125,
+              "business_cost": 0.61221,
+              "intent_accuracy": 0.75,
+              "overresponse": 0.035,
+              "safe_success": 0.65,
+              "scenario_count": 200,
+              "unauthorized_high_impact": 0
+            }
+          },
+          "overall": {
+            "attack_mitigation": 0.6325,
+            "attack_success": 0.3675,
+            "business_cost": 0.491285,
+            "intent_accuracy": 0.5975,
+            "overresponse": 0.025,
+            "safe_success": 0.465,
+            "unauthorized_high_impact": 0
+          },
+          "scenario_count": 400,
+          "scenario_count_by_task": {
+            "T1": 200,
+            "T2": 200
+          },
+          "t12_macro_safe_success": 0.465
+        },
+        "rollout_sha256": "cc60f92ea24bdf6526e87f22e1fe5221b7de78b0ef2a2cdf8c5a8f41b8d3337c",
+        "checkpoint_manifest_sha256": "87f8ed4484727a493791ae2ec534fee6918fa4403b56b5ab31b40b18a90ba119"
+      },
+      {
+        "epoch": 3,
+        "metrics": {
+          "by_task": {
+            "T1": {
+              "attack_mitigation": 0.4,
+              "attack_success": 0.6,
+              "business_cost": 0.37083,
+              "intent_accuracy": 0.4,
+              "overresponse": 0,
+              "safe_success": 0.285,
+              "scenario_count": 200,
+              "unauthorized_high_impact": 0
+            },
+            "T2": {
+              "attack_mitigation": 0.435,
+              "attack_success": 0.565,
+              "business_cost": 0.35007,
+              "intent_accuracy": 0.84,
+              "overresponse": 0,
+              "safe_success": 0.315,
+              "scenario_count": 200,
+              "unauthorized_high_impact": 0
+            }
+          },
+          "overall": {
+            "attack_mitigation": 0.4175,
+            "attack_success": 0.5825,
+            "business_cost": 0.36045,
+            "intent_accuracy": 0.62,
+            "overresponse": 0,
+            "safe_success": 0.3,
+            "unauthorized_high_impact": 0
+          },
+          "scenario_count": 400,
+          "scenario_count_by_task": {
+            "T1": 200,
+            "T2": 200
+          },
+          "t12_macro_safe_success": 0.3
+        },
+        "rollout_sha256": "7984d62addac865bc242f3d094a71f58d7e4a78608e8c972589294a01d88cf55",
+        "checkpoint_manifest_sha256": "6e52b541fb8ce75a1df8e2d023b96c701acf320523c9f39b9f5b2ead7d77b0b7"
+      },
+      {
+        "epoch": 4,
+        "metrics": {
+          "by_task": {
+            "T1": {
+              "attack_mitigation": 0.395,
+              "attack_success": 0.605,
+              "business_cost": 0.37407999999999997,
+              "intent_accuracy": 0.325,
+              "overresponse": 0,
+              "safe_success": 0.29,
+              "scenario_count": 200,
+              "unauthorized_high_impact": 0
+            },
+            "T2": {
+              "attack_mitigation": 0.45,
+              "attack_success": 0.55,
+              "business_cost": 0.36875,
+              "intent_accuracy": 0.82,
+              "overresponse": 0,
+              "safe_success": 0.32,
+              "scenario_count": 200,
+              "unauthorized_high_impact": 0
+            }
+          },
+          "overall": {
+            "attack_mitigation": 0.4225,
+            "attack_success": 0.5775,
+            "business_cost": 0.371415,
+            "intent_accuracy": 0.5725,
+            "overresponse": 0,
+            "safe_success": 0.305,
+            "unauthorized_high_impact": 0
+          },
+          "scenario_count": 400,
+          "scenario_count_by_task": {
+            "T1": 200,
+            "T2": 200
+          },
+          "t12_macro_safe_success": 0.305
+        },
+        "rollout_sha256": "93ada9d1dc94dd9e47167130df102310b1622986faba9b4bec424b186086ba5a",
+        "checkpoint_manifest_sha256": "257e8ab3e338e61072bf2908ead8b265dd90f6bd954a843a4ca3eb0815c96391"
+      }
+    ],
+    "rollout_hashes_and_safe_success_counts_verified": true
+  },
+  "training_data": {
+    "train_records": 4000,
+    "offline_dev_records": 400,
+    "train_records_per_task": {
+      "T1": 2000,
+      "T2": 2000
+    },
+    "offline_dev_records_per_task": {
+      "T1": 200,
+      "T2": 200
+    },
+    "source_train_manifest_sha256": "53441afea3150a3fe202c769eb2bfa3300aef510e04a0d07466e30c82dbd9384",
+    "source_train_jsonl_sha256": "35d010cdf3d5c3902ea65bc46e8a4f6aabe893fb4d6de79f399484c1044dd30f",
+    "source_dev_jsonl_sha256": "335cf2f3885803eb0b5d1e2f2437e592487def4e00ff008e59262dbad6dc7594",
+    "note": "The separate 400-trajectory rollout development suite selected epoch 2; these are not the 400 offline candidate records."
+  },
+  "aggregates": {
+    "new_t12": {
+      "by_task": {
+        "T1": {
+          "scenario_count": 150,
+          "public_group_count": 75,
+          "safe_success_count": 50,
+          "attack_mitigation_count": 65,
+          "correct_intent_count": 98,
+          "overresponse_count": 1,
+          "unauthorized_high_impact_count": 0,
+          "public_decision_count": 424,
+          "active_probe_decision_count": 46,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "safe_success_rate": 0.3333333333333333,
+          "attack_mitigation_rate": 0.43333333333333335,
+          "intent_accuracy": 0.6533333333333333,
+          "overresponse_rate": 0.006666666666666667,
+          "mean_business_cost": 0.3813066666666666,
+          "legacy_probe_yield_mean": 0.44,
+          "legacy_betrayal_detection_mean": 0.30666666666666664,
+          "active_probe_decision_rate": 0.10849056603773585,
+          "active_probe_types": {
+            "SourceChallenge": 46
+          }
+        },
+        "T2": {
+          "scenario_count": 150,
+          "public_group_count": 75,
+          "safe_success_count": 100,
+          "attack_mitigation_count": 132,
+          "correct_intent_count": 116,
+          "overresponse_count": 6,
+          "unauthorized_high_impact_count": 0,
+          "public_decision_count": 387,
+          "active_probe_decision_count": 14,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "safe_success_rate": 0.6666666666666666,
+          "attack_mitigation_rate": 0.88,
+          "intent_accuracy": 0.7733333333333333,
+          "overresponse_rate": 0.04,
+          "mean_business_cost": 0.58416,
+          "legacy_probe_yield_mean": 0.18666666666666668,
+          "legacy_betrayal_detection_mean": 0.006666666666666667,
+          "active_probe_decision_rate": 0.03617571059431524,
+          "active_probe_types": {
+            "CanaryProbe": 12,
+            "SourceChallenge": 2
+          }
+        }
+      },
+      "t12_only": {
+        "scenario_count": 300,
+        "safe_success_count": 150,
+        "attack_mitigation_count": 197,
+        "safe_success_rate": 0.5,
+        "attack_mitigation_rate": 0.6566666666666666
+      }
+    },
+    "old_v9": {
+      "by_task": {
+        "T1": {
+          "scenario_count": 150,
+          "public_group_count": 75,
+          "safe_success_count": 2,
+          "attack_mitigation_count": 5,
+          "correct_intent_count": 17,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "public_decision_count": 472,
+          "active_probe_decision_count": 6,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "safe_success_rate": 0.013333333333333334,
+          "attack_mitigation_rate": 0.03333333333333333,
+          "intent_accuracy": 0.11333333333333333,
+          "overresponse_rate": 0,
+          "mean_business_cost": 0.04858666666666666,
+          "legacy_probe_yield_mean": 0.005555555555555555,
+          "legacy_betrayal_detection_mean": 0.37333333333333335,
+          "active_probe_decision_rate": 0.012711864406779662,
+          "active_probe_types": {
+            "SourceChallenge": 4,
+            "CanaryProbe": 2
+          }
+        },
+        "T2": {
+          "scenario_count": 150,
+          "public_group_count": 75,
+          "safe_success_count": 1,
+          "attack_mitigation_count": 1,
+          "correct_intent_count": 150,
+          "overresponse_count": 0,
+          "unauthorized_high_impact_count": 0,
+          "public_decision_count": 748,
+          "active_probe_decision_count": 0,
+          "legacy_probe_grounded_action_revisions_sum": 0,
+          "safe_success_rate": 0.006666666666666667,
+          "attack_mitigation_rate": 0.006666666666666667,
+          "intent_accuracy": 1,
+          "overresponse_rate": 0,
+          "mean_business_cost": 0.01572,
+          "legacy_probe_yield_mean": 0,
+          "legacy_betrayal_detection_mean": 0.013333333333333334,
+          "active_probe_decision_rate": 0,
+          "active_probe_types": {}
+        }
+      },
+      "t12_only": {
+        "scenario_count": 300,
+        "safe_success_count": 3,
+        "attack_mitigation_count": 6,
+        "safe_success_rate": 0.01,
+        "attack_mitigation_rate": 0.02
+      }
+    }
+  }
+}
