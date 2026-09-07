@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 from pathlib import Path
 
 from agentguard_zero.defender_state.evidence_store import EvidenceStore
@@ -17,6 +18,21 @@ def test_audited_historical_results_are_unchanged() -> None:
     assert hashlib.sha256(path.read_bytes()).hexdigest() == (
         "d1cfa50ec1990a23579e46aeeb98eb714c52aa1d26c313c8621c60f597e43dda"
     )
+
+
+def test_release_metadata_separates_existing_results_from_proposed_methods() -> None:
+    root = Path(__file__).resolve().parents[1]
+    contract = json.loads((root / "configs/t12/t12_ranker_public.json").read_text())
+    assert contract["status"] == "audited_historical_result_architecture"
+    assert contract["scope"]["workflow_requirement_hints_in_model_input"] is True
+    assert contract["scope"]["complete_leakage_freedom_established"] is False
+    assert contract["runtime"]["ecrg_during_parameter_training"] is False
+    assert contract["runtime"]["ecrg_in_audited_evaluation"] is False
+    assert contract["runtime"]["selected_checkpoint_epoch"] == 2
+    assert contract["runtime"]["selected_checkpoint_optimizer_steps"] == 500
+    assert contract["data"]["dev_records"] == 400
+    assert contract["data"]["epoch_selection_trajectories"] == 400
+    assert contract["vnext_active_probing"]["status"] == "design_only_not_current_result"
 
 
 def test_current_t12_entrypoints_still_import() -> None:

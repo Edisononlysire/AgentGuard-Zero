@@ -1,12 +1,16 @@
 {
   "schema_version": 1,
   "kind": "agentguard_t12_public_method_contract",
-  "status": "current_result_architecture",
+  "status": "audited_historical_result_architecture",
+  "audited_on": "2026-09-07",
+  "contract_type": "descriptive_metadata_not_training_launcher",
   "scope": {
     "tasks": ["T1", "T2"],
     "task_label_in_model_input": false,
     "hidden_state_in_model_input": false,
-    "teacher_scores_in_model_input": false
+    "teacher_scores_in_model_input": false,
+    "workflow_requirement_hints_in_model_input": true,
+    "complete_leakage_freedom_established": false
   },
   "model": {
     "backbone": "Qwen3.5-4B",
@@ -34,6 +38,8 @@
     "dev_records": 400,
     "train_records_per_task": 2000,
     "dev_records_per_task": 200,
+    "epoch_selection_trajectories": 400,
+    "epoch_selection_trajectories_per_task": 200,
     "decision_families": [
       "observe",
       "passive_verification",
@@ -59,6 +65,9 @@
   },
   "runtime": {
     "ecrg_during_parameter_training": false,
+    "ecrg_in_audited_evaluation": false,
+    "selected_checkpoint_epoch": 2,
+    "selected_checkpoint_optimizer_steps": 500,
     "save_each_epoch": true,
     "checkpoint_selection_source": "heldout_t12_dev_400",
     "formal_test_used_for_selection": false

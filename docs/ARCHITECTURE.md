@@ -1,4 +1,4 @@
-# T1/T2 Model Architecture
+# Existing T1/T2 Model Architecture
 
 This page describes the historical result-producing model. See the
 [audited existing results](RESULTS.md) and the
@@ -15,8 +15,11 @@ related decisions:
    `active_probe`, `trust`, and `mitigation`;
 2. rank candidates inside the selected family by expected safe utility.
 
-Task labels, hidden attack state, oracle values, and teacher scores are not
-included in the encoded policy input.
+Explicit task labels, hidden attack state, oracle values, and teacher scores
+are omitted from the encoded policy input. This is a field-level statement,
+not a proof that the input has no answer shortcuts: the audited encoder still
+includes `require_*` workflow hints, and the environment and teacher enforce
+related workflow constraints. See [the current limitations](STATUS.md).
 
 ## 2. Encoder
 
@@ -80,8 +83,12 @@ The frozen current run used:
 | Maximum sequence length | 2,048 |
 | Selection | hierarchical family then utility |
 | ECRG during parameter training | disabled |
+| ECRG in the audited evaluation | disabled |
+| Selected checkpoint | epoch 2, optimizer step 500 |
 
-The 400 trajectory epoch-selection suite is separate from formal test data.
+The 400-trajectory epoch-selection suite is distinct from the 400 offline
+development records and separate from the retention suites in [RESULTS](RESULTS.md).
+The four completed epochs do not mean that the reported policy uses epoch 4.
 Checkpoint selection is lexicographic, led by macro T1/T2 Safe Success.
 
 ## 5. Scenario And Supervision Path
@@ -105,9 +112,10 @@ candidate-set hashes, group lineage, and train/dev disjointness checks.
 The current scenario contract exposes requirement fields that can correlate a
 task state with a particular probe family, and the current teacher contains
 probe preferences tied to those requirements. The existing result is therefore
-evidence for the current AEP policy, but not yet the strongest possible proof
-of task-independent active information gathering.
+evidence for the historical T12 candidate policy, not for the proposed
+VoI-supervised AEP or task-independent causal probing.
 
-The vNext design removes those public shortcuts, gives both tasks the same
-probe registry, returns raw delayed evidence from causal mechanisms, and trains
-the teacher to prefer a probe when its Value of Information is positive.
+The proposed vNext implementation would remove those public shortcuts, give
+both tasks the same probe registry, return raw delayed evidence from causal
+mechanisms, and train the teacher to prefer a probe when its Value of
+Information is positive.
