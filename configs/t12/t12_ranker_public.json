@@ -65,8 +65,8 @@
   },
   "vnext_active_probing": {
     "status": "design_only_not_current_result",
-    "design": "docs/T12_OVERALL_PLAN_20260907.md",
-    "superseded_design": "docs/T1_T2_ACTIVE_PROBING_DESIGN_20260904.md",
+    "design": "docs/PLAN.md",
+    "implementation_status": "docs/STATUS.md",
     "shared_probe_registry": true,
     "task_to_probe_mapping": false,
     "teacher_encourages_positive_voi_probes": true

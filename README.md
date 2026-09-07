@@ -1,167 +1,88 @@
-# AgentGuard-Zero: T1/T2 Research Release
+# AgentGuard-Zero
 
-This repository contains the public implementation scope needed to inspect the
-current AgentGuard T1/T2 result and the proposed next-generation active probing
-system.
+**T1/T2：对抗性信任条件下的成本敏感主动证据获取。**
 
-The focused tasks are:
+本仓库只维护当前 T12 源码、最新整体规划和最近核验的结果摘要。
+旧作业、旧版设计、无关实验与运行日志已从默认分支移除。
 
-- **T1: ambiguity-driven active investigation**;
-- **T2: trust build-up followed by source betrayal or legitimate change**.
+> **状态：已有 T12 实现与结果可以检查；新版主动试探仍待实现和验证。**
+> 当前结果来自冻结场景生成器与 Qwen3.5-4B LoRA 候选策略，ECRG 未启用。
+> 不把它写成新版因果试探、ECRG 增益或 DCA 参数共进化的结果。
 
-The release includes the public-state candidate ranker, T1/T2 scenario
-generator, robust teacher, data construction, frozen training/evaluation
-contracts, tests, and an audited aggregate-only historical results snapshot.
-It intentionally excludes model weights, LoRA adapters, generated datasets,
-raw trajectories, logs, credentials, and scheduler outputs.
+## 从这里阅读
 
-## Latest Plan And Existing Results
+| 文档 | 内容 |
+|---|---|
+| **[整体规划](docs/PLAN.md)** | 唯一有效的研究方案：T1/T2、主动证据策略、ECRG、教师、实验和迁移 |
+| **[模型架构](docs/ARCHITECTURE.md)** | 当前真正产生结果的模型、LoRA、排序头、训练与场景生成路径 |
+| **[现有结果](docs/RESULTS.md)** | 最新核验的历史结果、原始分母、失败门禁及来源哈希 |
+| **[当前状态与问题](docs/STATUS.md)** | 已验证内容、确定性反例、待修正项和清理边界 |
 
-- **[新版整体规划（中文，2026-09-07）](docs/T12_OVERALL_PLAN_20260907.md)**:
-  revised active probing, public-information teacher, ECRG, data boundaries,
-  matched baselines, causal tests, external investigation transfer, and delivery.
-- **[现有 T1/T2 结果（中文，2026-09-07）](docs/T12_CURRENT_RESULTS_20260907.md)**:
-  verified counts, all four development epochs, probe usage, and limitations.
-- **[Machine-readable historical results](results/t12_legacy_retention_20260907.json)**:
-  aggregate counts and source hashes, without private paths or raw traces.
+## 已有结果
 
-| Historical T12, ECRG disabled | Safe Success | Attack Mitigation |
+| 当前 T12，ECRG 关闭 | Safe Success | Attack Mitigation |
 |---|---:|---:|
-| T1 | 50/150 (33.33%) | 65/150 (43.33%) |
-| T2 | 100/150 (66.67%) | 132/150 (88.00%) |
+| T1 观测歧义与主动调查 | 50/150（33.33%） | 65/150（43.33%） |
+| T2 信任建立后背叛／合法变化 | 100/150（66.67%） | 132/150（88.00%） |
 
-These are **legacy development/retention results**, not untouched final tests
-for the new protocol. The original retention gate **did not pass**, including
-overresponse and intent-retention checks. No vNext causal-probing or T12+ECRG
-gain is claimed. Read the results page for negative evidence and denominators.
+这是旧协议的 development/retention 证据，不是新协议未接触的最终测试。
+原始 retention gate **未通过**，包括过度响应与部分意图识别退化。
+详见[结果解释](docs/RESULTS.md)及[可机读汇总](results/t12_legacy_retention_20260907.json)。
 
-## Release Status
-
-Two method states are kept separate:
-
-1. **Current T1/T2 model**: the architecture and data path that produced the
-   existing T1/T2 result. It uses a Qwen3.5-4B LoRA candidate ranker with
-   hierarchical action-family and candidate-utility selection.
-2. **Independent active probing vNext**: a revised design proposal. It removes
-   task-to-probe shortcuts, gives T1 and T2 the same probe registry, produces
-   delayed raw observations through causal simulator mechanisms, and teaches
-   probing through value of information. It has not yet produced the current
-   result and is not presented as implemented training output.
-
-See:
-
-- [`docs/T12_MODEL_ARCHITECTURE.md`](docs/T12_MODEL_ARCHITECTURE.md)
-- [`docs/T12_RELEASE_SCOPE.md`](docs/T12_RELEASE_SCOPE.md)
-- [`docs/T12_OVERALL_PLAN_20260907.md`](docs/T12_OVERALL_PLAN_20260907.md)
-- [`docs/T1_T2_ACTIVE_PROBING_DESIGN_20260904.md`](docs/T1_T2_ACTIVE_PROBING_DESIGN_20260904.md)
-  (superseded proposal, retained for provenance)
-
-## Current T1/T2 Pipeline
+## 当前代码路径
 
 ```text
-T1/T2 hidden-world scenario groups
-        |
-        v
-cyber-grounded public observations
-        |
-        v
-public-only robust teacher + legal candidate generator
-        |
-        v
-4,000 train / 400 held-out candidate sets
-        |
-        v
-Qwen3.5-4B + LoRA public-state/candidate encoder
-        |
-        +--> action-family head
-        +--> candidate utility head
-        +--> public auxiliary heads
-        |
-        v
-hierarchical family-then-utility decision
+T1/T2 配对隐藏世界 -> 公开观测与合法候选
+                   -> 公开信息教师与流程约束监督
+                   -> 4B LoRA：动作族选择 + 候选效用排序
+                   -> 环境执行、证据更新、轨迹评价
 ```
 
-The policy input excludes hidden state, oracle labels, teacher scores, and task
-labels. Training metadata may retain those fields for offline audit, but the
-public projector is the model-input boundary.
-
-## Repository Map
-
-| Path | Purpose |
+| 路径 | 用途 |
 |---|---|
-| `agentguard_zero/candidate/` | candidate generation, encoding, heads, ranking, and branch supervision |
-| `agentguard_zero/recovery/canonical_scenarios.py` | canonical hidden-world T1/T2 construction |
-| `agentguard_zero/candidate/cyber_grounding.py` | public cyber grounding and ATT&CK/telemetry mappings |
-| `agentguard_zero/recovery/public_teacher.py` | public-state robust teacher used for current supervision |
-| `scripts/build_v11_t12_native_v2.py` | exact current 4,000/400 T1/T2 dataset builder |
-| `scripts/train_candidate_ranker.py` | Qwen/LoRA multi-head candidate-ranker trainer |
-| `scripts/eval_v11_single_expert_policy.py` | single-expert trajectory evaluation |
-| `configs/t12/t12_ranker_public.json` | portable description of the frozen model/training contract |
-| `scripts/smoke_t12_scenarios.py` | CPU smoke for T1/T2 scenario generation and leakage checks |
-| `results/t12_legacy_retention_20260907.json` | audited aggregate historical evidence, not new-protocol results |
+| `agentguard_zero/candidate/` | 候选生成、模型编码、排序头与策略 |
+| `agentguard_zero/recovery/canonical_scenarios.py` | 受控场景生成器 |
+| `agentguard_zero/candidate/cyber_grounding.py` | 网络安全语义与遥测映射 |
+| `agentguard_zero/recovery/public_teacher.py` | 公开信息教师 |
+| `agentguard_zero/env/`、`world/`、`defender_state/` | 环境、隐藏状态、证据、信任与记忆 |
+| `agentguard_zero/governance/` | 公开证据授权与 ECRG 相关实现 |
+| `scripts/build_v11_t12_native_v2.py` | 当前 4,000/400 条候选状态数据构建 |
+| `scripts/train_candidate_ranker.py` | LoRA 候选策略训练 |
+| `scripts/eval_v11_single_expert_policy.py` | 单一 T12 专家轨迹评测 |
+| `scripts/select_v11_t12_epoch.py` | 开发轨迹上的 checkpoint 选择 |
+| `configs/t12/t12_ranker_public.json` | 已有模型的公开训练配置摘要 |
 
-## Quick Start
+仍被上述入口导入的共享兼容模块保留原文件名，避免破坏依赖。
+它们不表示恢复四任务、三专家路由或旧共进化实验作为当前主线。
+当前模型仍可看到 `require_*` 流程要求；这是新版要消除的已知限制，
+不是已经完成无捷径验证的实现。
 
-Python 3.12 was used for the experiments. The CPU inspection path is:
+## CPU 检查
+
+参考实验使用 Python 3.12。无需下载模型即可执行环境与数据路径检查：
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 python scripts/smoke_t12_scenarios.py --groups-per-task 2
-python -m pytest -q \
-  tests/test_v11_t12_native_v2.py \
-  tests/test_v11_t12_epoch_selection.py
+python -m pytest -q
+python scripts/check_public_release.py
 ```
 
-The full ranker needs a local Qwen3.5-4B checkpoint plus CUDA-compatible
-PyTorch, Transformers, PEFT, and the packages in
-`requirements-training.txt`. The repository does not redistribute the base
-model or trained adapter.
+参数训练另需本地 Qwen3.5-4B 权重与匹配 CUDA 的运行环境，依赖见
+`requirements-training.txt`。本发布不包含模型、adapter、原始训练／测试数据
+或机器专用作业脚本。汇总计数支持重算表格，但不替代完整实验材料。
 
-The exact result-producing hyperparameters are recorded in
-`configs/t12/t12_ranker_public.json`. Machine-specific frozen manifests are not
-published because they contain private filesystem paths and do not improve the
-portable source release.
+## 发布边界
 
-## Active Probing vNext
-
-T1 and T2 will share four tool interfaces:
-
-- `AttestationChallenge` (`SourceChallenge` compatibility alias);
-- `SensorCanaryProbe` (`CanaryProbe` alias);
-- `DecoyInteractionProbe` (`DecoyProbe` alias);
-- `ShadowEnforcementProbe` (`ShadowActionProbe` alias).
-
-Canary and decoy are the primary environment interventions. Attestation is
-active source verification; shadow execution estimates response impact. Valid
-authentication is not proof of truth, and raw-looking output fields must not
-encode hidden attack labels.
-
-The teacher will actively cover beneficial probing opportunities while keeping
-the same policy at indistinguishable public histories. Cost is counted once;
-confirmation of a correct decision can be useful without changing the action.
-No task ID or `require_*_probe` field may route the model to a probe. Result
-masking, no-probe rollouts, and result corruption are separate evaluations.
-
-The complete proposed contract, causal mechanisms, data composition, losses,
-counterfactual metrics, and acceptance gates are in
-[`docs/T12_OVERALL_PLAN_20260907.md`](docs/T12_OVERALL_PLAN_20260907.md).
-This is a plan, not a claim that the new runtime or training has been implemented.
-
-## Safety And Reproducibility
-
-- The simulator uses abstract, safety-bounded defensive actions.
-- It does not produce exploit payloads or execute attacks against real systems.
-- Train/dev/test groups must be split by public-group identity.
-- Public policy inputs must pass the hidden-state leakage audit.
-- Checkpoints and data artifacts are hash-bound but excluded from Git.
-- Aggregate results permit table recalculation, not full experiment reproduction
-  without the separately held data and checkpoints.
-- Current results and proposed vNext behavior are never conflated.
+- 不发布 checkpoint、原始轨迹、日志、凭据或服务器路径。
+- 保留结果中的负面证据；不通过清理仓库隐藏失败。
+- 不在本次整理中改变训练协议或启动训练；待修复内容明确列在状态页。
+- 旧版可由 Git 历史及 `pre-cleanup-20260907` 标签追溯，不在默认目录重复摆放。
+- 代码仅执行受控符号化防御，不执行真实攻击、恶意载荷或漏洞利用。
 
 ## License
 
-AgentGuard-Zero project code is released under the Apache License 2.0.
-Vendored third-party components remain under their respective upstream
-licenses; see `THIRD_PARTY_NOTICES.md`.
+项目代码采用 Apache-2.0。第三方出处与许可材料见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

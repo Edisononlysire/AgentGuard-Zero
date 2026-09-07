@@ -153,6 +153,10 @@ class EvidenceStore:
             "available_at": int(time),
             "integrity_status": "valid",
         }
+        # A delayed probe result is a public event that later verification
+        # tools may legitimately target. Index it exactly like a raw event so
+        # derived evidence inherits the public provenance root.
+        self._event_index[event_id] = evidence_id
         return evidence_id
 
     def add_tool_result(

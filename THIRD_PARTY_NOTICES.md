@@ -1,16 +1,17 @@
 # Third-Party Notices
 
-This repository vendors the runtime subset of two modified training components
-because AgentGuard-Zero relies on project-specific rollout and worker behavior
-that is not represented by an unmodified package release. Unused upstream
-examples, tests, code-execution tools, search tools, and SQL tools are omitted.
+The focused T12 candidate-ranker release uses externally installed PyTorch,
+Transformers, PEFT, and related packages under their respective upstream licenses.
+It does not vendor the retired VerL or Verl-Tool training runtimes.
 
-| Component | Upstream | License | Preserved file |
-|---|---|---|---|
-| VerL | https://github.com/volcengine/verl | Apache-2.0 | `third_party/VERL_LICENSE` |
-| Verl-Tool | https://github.com/TIGER-AI-Lab/verl-tool | MIT | `third_party/VERL_TOOL_LICENSE` |
+The earlier training components and their original notices remain available in
+Git history at the `pre-cleanup-20260907` tag. License material is retained here
+for provenance; it is not an instruction to install the old training stack.
 
-The VerL notice text is preserved at `third_party/VERL_NOTICE.txt`. All files
-under `third_party/` remain governed by their upstream license and copyright
-notices. AgentGuard-Zero-specific code outside `third_party/` is governed by
-the repository-level Apache-2.0 license.
+| Historical component | Upstream | License material |
+|---|---|---|
+| VerL | https://github.com/volcengine/verl | `third_party/VERL_LICENSE`, `third_party/VERL_NOTICE.txt` |
+| Verl-Tool | https://github.com/TIGER-AI-Lab/verl-tool | `third_party/VERL_TOOL_LICENSE` |
+
+AgentGuard-Zero project code remains under the repository-level Apache-2.0
+license. Retained source-level attribution and copyright notices remain intact.
