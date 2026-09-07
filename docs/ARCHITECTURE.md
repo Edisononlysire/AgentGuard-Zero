@@ -62,9 +62,10 @@ risk; these are not explicit optimization terms in the current T1/T2 run.
 Final action selection remains hierarchical family-then-utility.
 
 The existing `probe_value` head is present but was not explicitly supervised by
-the current `branched_defense` loss. The independent active probing proposal
-activates it with Value-of-Information supervision; that proposed loss was not
-the source of the current result.
+the current `branched_defense` loss. The revised plan would test explicit
+Value-of-Information supervision only in the matched `AEP-Policy+VoIaux` arm.
+The core `AEP-Policy` arm would learn public-value teacher actions without this
+auxiliary loss. Neither proposed training arm produced the historical result.
 
 ## 4. Training Contract
 
@@ -119,3 +120,12 @@ The proposed vNext implementation would remove those public shortcuts, give
 both tasks the same probe registry, return raw delayed evidence from causal
 mechanisms, and train the teacher to prefer a probe when its Value of
 Information is positive.
+
+The 2026-09-07 CPU review also reproduced loss of an older evidence record when
+the candidate references its evidence ID but the compactor prioritizes its
+event ID. Minimal inputs differing only in root-source dependencies or evidence
+availability time can map to the same policy text. These defects remain in the
+published runtime; their frequency in historical rollouts is not yet measured.
+See [STATUS](STATUS.md) for evidence levels and [PLAN](PLAN.md) for the staged
+repair and diagnostic gates. The plan does not mandate replacing hierarchical
+selection or extending the existing architecture before measuring actual losses.

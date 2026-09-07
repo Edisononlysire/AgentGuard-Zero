@@ -33,6 +33,15 @@ def test_release_metadata_separates_existing_results_from_proposed_methods() -> 
     assert contract["data"]["dev_records"] == 400
     assert contract["data"]["epoch_selection_trajectories"] == 400
     assert contract["vnext_active_probing"]["status"] == "design_only_not_current_result"
+    proposed = contract["vnext_active_probing"]
+    assert proposed["plan_revision"] == "2026-09-07-r2"
+    assert proposed["core_training_arm"] == "public_value_policy_supervision"
+    assert proposed["voi_auxiliary_required_for_core_method"] is False
+    assert proposed["ecrg_comparison"] == "same_checkpoint_inference_only"
+    assert proposed["implementation_gate_status"] == "pending"
+    assert proposed["plan_revision"] in (root / "docs/PLAN.md").read_text()
+    assert proposed["plan_revision"] in (root / "docs/STATUS.md").read_text()
+    assert proposed["plan_revision"] in (root / "README.md").read_text()
 
 
 def test_current_t12_entrypoints_still_import() -> None:

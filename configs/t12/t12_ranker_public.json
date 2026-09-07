@@ -74,6 +74,12 @@
   },
   "vnext_active_probing": {
     "status": "design_only_not_current_result",
+    "plan_revision": "2026-09-07-r2",
+    "core_training_arm": "public_value_policy_supervision",
+    "comparison_training_arm": "same_policy_supervision_plus_explicit_voi_auxiliary_loss",
+    "voi_auxiliary_required_for_core_method": false,
+    "ecrg_comparison": "same_checkpoint_inference_only",
+    "implementation_gate_status": "pending",
     "design": "docs/PLAN.md",
     "implementation_status": "docs/STATUS.md",
     "shared_probe_registry": true,
