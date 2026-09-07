@@ -1,5 +1,10 @@
 # T1/T2 Model Architecture
 
+This page describes the historical result-producing model. See the
+[audited existing results](T12_CURRENT_RESULTS_20260907.md) and the
+[revised overall plan](T12_OVERALL_PLAN_20260907.md) for the current evidence
+boundary and proposed next steps; the proposal has not produced these results.
+
 ## 1. Decision Interface
 
 At each step, the environment exposes a public observation and the candidate
