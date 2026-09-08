@@ -13,6 +13,7 @@ from agentguard_zero.protocol import (
     RAW_EVENT_RESERVED_TYPES,
 )
 from agentguard_zero.world.public_projector import project_event
+from agentguard_zero.world.canary import validate_probe_model
 
 
 PROTOCOL_VERSION = "tmcd-v2"
@@ -281,6 +282,12 @@ def validate_scenario_v2(scenario: dict[str, Any]) -> tuple[bool, str]:
         return False, "invalid_distribution"
     if scenario.get("true_attack", {}).get("objective") not in OBJECTIVES:
         return False, "invalid_true_objective"
+    if not isinstance(scenario.get("true_attack", {}).get("present", True), bool):
+        return False, "invalid_attack_present"
+    try:
+        validate_probe_model(scenario.get('probe_model', {}))
+    except ValueError as exc:
+        return False, str(exc)
     if any(phase not in PHASES for phase in scenario.get("true_attack", {}).get("phase_schedule", [])):
         return False, "invalid_attack_phase"
     if scenario.get("split") in {"train", "dev", "xplay"} and scenario.get("scenario_family") in OOD_FAMILIES:

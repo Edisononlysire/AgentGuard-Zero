@@ -7,6 +7,8 @@ import math
 import os
 from typing import Any
 
+from agentguard_zero.protocol import AEP_ENV_REVISION
+
 from agentguard_zero.defender_state.evidence_store import EvidenceStore
 from agentguard_zero.defender_state.append_only_memory import AppendOnlyProfileMemory
 from agentguard_zero.defender_state.memory_fsm import EvidenceStateMemory
@@ -33,6 +35,7 @@ from agentguard_zero.variants import (
 )
 from agentguard_zero.world.public_projector import assert_public, project_event, project_public
 from agentguard_zero.world.hidden_world import HiddenWorld
+from agentguard_zero.world.canary import canary_measurement, schedule_canary
 from agentguard_zero.world.oracle_ledger import OracleLedger
 
 
@@ -50,6 +53,7 @@ class CyberDefenseEnvV2:
     """TMCD-v2 symbolic environment with strict hidden/public state isolation."""
 
     protocol_version = "tmcd-v2"
+    environment_revision = AEP_ENV_REVISION
 
     def __init__(
         self,
@@ -96,13 +100,16 @@ class CyberDefenseEnvV2:
         self.oracle_ledger = OracleLedger()
         self.business_cost = 0.0
         self.verification_cost = 0.0
+        self.invalid_tool_cost = 0.0
         self.active_probe_count = 0
         self.high_impact_count = 0
         self.attack_mitigated = False
         self.attack_success = False
+        self.episode_done = False
         self.last_tool_result: dict[str, Any] | None = None
         self.business_impact_estimates: list[dict[str, Any]] = []
         self.public_probe_state: list[dict[str, Any]] = []
+        self._pending_canaries: dict[str, dict[str, Any]] = {}
         self._observed_event_ids: set[str] = set()
         self._observed_internal_events: dict[str, dict[str, Any]] = {}
         self._last_retrieved_ids: set[str] = set()
@@ -127,7 +134,7 @@ class CyberDefenseEnvV2:
         raw = json.dumps(
             {
                 "namespace": namespace,
-                "scenario": self.scenario.get("scenario_id", "unknown"),
+                "scenario": self.scenario.get('noise_key', self.scenario.get("scenario_id", "unknown")),
                 "time": self.t,
                 "payload": payload,
             },
@@ -152,7 +159,6 @@ class CyberDefenseEnvV2:
             "CrossCheck": 0.70,
             "ProvenanceCheck": 0.72,
             "SourceChallenge": 0.76,
-            "CanaryProbe": 0.70,
         }.get(tool, 0.65)
         accuracy = max(
             0.55,
@@ -172,9 +178,16 @@ class CyberDefenseEnvV2:
         for probe in self.public_probe_state:
             if probe.get("status") != "pending" or int(probe.get("effective_at", -1)) > self.t:
                 continue
+            if probe.get('type') == 'canary':
+                result = canary_measurement(self._pending_canaries[probe['probe_id']], time=self.t)
+                if result is not None:
+                    probe['status'] = result['status']
+                    probe['resolved_at'] = self.t
+                    generated.append(result)
+                continue
             zone = str(probe.get("zone", "unknown"))
             match = zone == target_zone or zone == self.hidden_world.target
-            probability = 0.75 if match and self.hidden_world.current_phase in active_phases else 0.25
+            probability = 0.75 if self.hidden_world.attack_present and not self.hidden_world.mitigated and match and self.hidden_world.current_phase in active_phases else 0.25
             interaction = self._stable_draw("DecoyProbe", probe.get("probe_id", "")) < probability
             probe["status"] = "resolved"
             probe["resolved_at"] = int(self.t)
@@ -228,7 +241,7 @@ class CyberDefenseEnvV2:
                 evidence_id = self.evidence_store.add_probe_result(
                     public,
                     time=self.t,
-                    tool="DecoyProbe",
+                    tool='CanaryProbe' if internal.get('type') == 'canary_probe_result' else "DecoyProbe",
                 )
             else:
                 evidence_id = self.evidence_store.add_event(public, time=self.t)
@@ -402,6 +415,16 @@ class CyberDefenseEnvV2:
         return None
 
     def _execute_tool(self, tool_call: dict[str, Any], snapshot: list[dict[str, Any]]) -> dict[str, Any]:
+        before = self.verification_cost
+        result = self._execute_tool_impl(tool_call, snapshot)
+        charged = self.verification_cost - before
+        result['cost'] = float(charged)
+        result['probe_attempted'] = bool(charged > 0 and result.get('tool') in ACTIVE_PROBE_TOOLS)
+        if result.get('error'):
+            self.invalid_tool_cost += charged
+        return result
+
+    def _execute_tool_impl(self, tool_call: dict[str, Any], snapshot: list[dict[str, Any]]) -> dict[str, Any]:
         tool_call = tool_call if isinstance(tool_call, dict) else {"name": "None", "args": {}}
         name = str(tool_call.get("name", "None"))
         args = tool_call.get("args", {}) if isinstance(tool_call.get("args", {}), dict) else {}
@@ -437,6 +460,8 @@ class CyberDefenseEnvV2:
                     "cost": 0.0,
                 }
             self.verification_cost += tool_cost
+            if name in ACTIVE_PROBE_TOOLS:
+                self.active_probe_count += 1
         requested_event_id = str(args.get("event_id", "unknown"))
         event = self._observed_internal_events.get(requested_event_id)
         if event is None:
@@ -459,8 +484,6 @@ class CyberDefenseEnvV2:
                 "error": "unknown_event_id",
                 "evidence_created": False,
             }
-        if name in ACTIVE_PROBE_TOOLS:
-            self.active_probe_count += 1
         if name == "LogQuery":
             return project_public(log_query(snapshot, source=args.get("source"), time=args.get("time")))
         if name == "CrossCheck":
@@ -552,16 +575,21 @@ class CyberDefenseEnvV2:
                 "active_probe": True,
             }
         if name == "CanaryProbe":
-            triggered = self._noisy_negative_signal(event, tool=name)
-            return {
-                "tool": name,
-                "event_id": str(event.get("event_id", "unknown")),
-                "source": str(event.get("source_id") or event.get("source") or "unknown"),
-                "canary_triggered": triggered,
-                "confidence_band": "medium",
-                "verdict": "inconsistent" if triggered else "consistent",
-                "active_probe": True,
-            }
+            source = str(event.get('source_id', ''))
+            profile = next((row for row in self.scenario['source_profiles'] if row['source_id'] == source), None)
+            if profile is None:
+                return {'tool': name, 'error': 'canary_source_has_no_telemetry_profile'}
+            probe_id = f'probe-{self.t}-{len(self.public_probe_state)}'
+            pending = schedule_canary(profile=profile, model=self.scenario.get('probe_model', {}),
+                                      event=event, time=self.t, probe_id=probe_id, draw=self._stable_draw)
+            self._pending_canaries[probe_id] = pending
+            # Only the public deadline is visible; never expose the sampled arrival/drop outcome.
+            probe = {'probe_id': probe_id, 'type': 'canary', 'source': source,
+                     'issued_at': self.t, 'nonce': pending['nonce'], 'status': 'pending',
+                     'effective_at': self.t + 1,
+                     'expires_at': self.t + int(self.scenario.get('probe_model', {}).get('canary', {}).get('timeout', 3))}
+            self.public_probe_state.append(probe)
+            return {'tool': name, 'active_probe': True, **probe}
         if name == "DecoyProbe":
             zone = str(args.get("zone", "server"))
             public_zones = {asset["zone"] for asset in self._public_assets()}
@@ -602,6 +630,8 @@ class CyberDefenseEnvV2:
                 "active_probe": name == "ShadowActionProbe",
                 "overresponse_risk": min(1.0, float(impact.get("estimated_cost", 0.0)) / 2.0),
             }
+        if name != "None":
+            return {"tool": name, "error": "unknown_tool", "executed": False}
         return {"tool": "None", "message": "no tool executed"}
 
     def _authorize_response(
@@ -629,6 +659,8 @@ class CyberDefenseEnvV2:
         )
 
     def step(self, action_packet: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        if self.episode_done:
+            raise RuntimeError('episode_already_complete')
         action_packet = action_packet if isinstance(action_packet, dict) else {}
         # The rollout server recreates the environment after the initial
         # prompt was built; materialize the identical public state locally.
@@ -883,7 +915,7 @@ class CyberDefenseEnvV2:
 
         public_tool_result = project_public(tool_result)
         tool_name = str((action_packet.get("tool_call", {}) or {}).get("name", "None"))
-        if tool_name == "None" or public_tool_result.get("error"):
+        if tool_name == "None" or public_tool_result.get("error") or public_tool_result.get("status") == "pending":
             # A no-op or failed call is feedback, not independently referencable evidence.
             self.last_tool_result = (
                 {"tool": "None"} if tool_name == "None" else public_tool_result
@@ -928,8 +960,16 @@ class CyberDefenseEnvV2:
         self.hidden_world.advance_attack()
         self.attack_success = self.hidden_world.succeeded
         self.t += 1
-        done = self.t >= self.max_steps or self.attack_mitigated or self.attack_success
-        if done and not self.attack_mitigated:
+        future_events = any(
+            int(event.get("time", -1)) >= self.t
+            for event in self.scenario.get("event_schedule", [])
+        )
+        pending_probes = any(row.get("status") == "pending" for row in self.public_probe_state)
+        done = self.t >= self.max_steps or self.attack_success or (
+            self.attack_mitigated and not future_events and not pending_probes
+        )
+        if done and self.hidden_world.attack_present and not self.attack_mitigated:
             self.attack_success = True
             self.hidden_world.succeeded = True
+        self.episode_done = bool(done)
         return ({} if done else self.observe()), copy.deepcopy(self.last_tool_result), done

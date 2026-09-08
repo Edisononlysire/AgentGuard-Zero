@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from agentguard_zero.protocol import AEP_ENV_REVISION, AEP_METRIC_REVISION
+
 from agentguard_zero.evaluation.rq3_memory import memory_lifecycle_metrics
 from agentguard_zero.evaluation.rq4_trust import trust_metrics
 from agentguard_zero.variants import experiment_variant
@@ -42,12 +44,13 @@ def _top_belief(history: list[dict[str, Any]]) -> str:
 def _probe_metrics(
     env: Any,
     *,
-    horizon: int = 2,
+    horizon: int | None = None,
 ) -> tuple[int, int, float, float, int, int]:
     probe_rows = [
         (index, step)
         for index, step in enumerate(env.history)
-        if bool(step.get("tool_result", {}).get("active_probe"))
+        if bool(step.get("tool_result", {}).get("probe_attempted")
+                or step.get("tool_result", {}).get("active_probe"))
     ]
     available = 0
     useful = 0
@@ -58,7 +61,8 @@ def _probe_metrics(
         result = step.get("tool_result", {}) or {}
         evidence_id = str(result.get("evidence_id", ""))
         probe_id = str(result.get("probe_id", ""))
-        related_evidence_ids = {evidence_id} if evidence_id else set()
+        record = env.evidence_store.get(evidence_id, time=getattr(env, 't', 0)) if evidence_id else None
+        related_evidence_ids = {evidence_id} if record and (record.get('public_payload') or {}).get('status') != 'pending' else set()
         if probe_id:
             related_evidence_ids.update(
                 str(record.get("evidence_id", ""))
@@ -66,11 +70,17 @@ def _probe_metrics(
                 if str((record.get("public_payload", {}) or {}).get("probe_id", ""))
                 == probe_id
                 and str(record.get("evidence_id", ""))
+                and (record.get('public_payload') or {}).get('status') != 'pending'
             )
         available += int(bool(related_evidence_ids))
         state_updated = False
         action_revised = False
-        for followup in env.history[index + 1 : index + 1 + max(1, int(horizon))]:
+        stop = None if horizon is None else index + 1 + max(1, int(horizon))
+        for position, followup in enumerate(env.history[index + 1 : stop], index + 1):
+            available_ids = {
+                ref for ref in related_evidence_ids
+                if env.evidence_store.get(ref, time=int(followup.get('time', position))) is not None
+            }
             state_events = [
                 event
                 for key in ("trust_events", "memory_events")
@@ -80,7 +90,7 @@ def _probe_metrics(
             if related_evidence_ids and any(
                 event.get("committed", False)
                 and bool(
-                    related_evidence_ids
+                    available_ids
                     & {str(item) for item in event.get("evidence_refs", []) or []}
                 )
                 for event in state_events
@@ -92,7 +102,7 @@ def _probe_metrics(
                 for item in response.get("authorization_evidence_ids", []) or []
                 if str(item)
             }
-            if bool(related_evidence_ids & authorization_refs):
+            if response.get('authorized', False) and response.get('executed_action', 'Observe') in CONTAINMENT_ACTIONS and bool(available_ids & authorization_refs):
                 action_revised = True
         grounded_state_updates += int(state_updated)
         grounded_action_revisions += int(action_revised)
@@ -111,10 +121,10 @@ def _probe_metrics(
 def _response_safety_metrics(env: Any) -> tuple[float, float, int]:
     rows = list(getattr(env.hidden_world, "response_history", []))
     containment = [row for row in rows if str(row.get("action", "")) in CONTAINMENT_ACTIONS]
-    false_containment = sum(int(not bool(row.get("target_matches", False))) for row in containment)
+    false_containment = sum(int(not row.get('attack_present', True) or not bool(row.get("target_matches", False))) for row in containment)
     excess_values: list[float] = []
     for row in containment:
-        if not row.get("target_matches") or not row.get("belief_matches"):
+        if not row.get("target_matches") or not row.get('attack_present', True):
             continue
         pressure = float(row.get("attack_pressure_before", 1.0))
         phase = str(row.get("phase", "unknown"))
@@ -127,7 +137,7 @@ def _response_safety_metrics(env: Any) -> tuple[float, float, int]:
         ]
         if not sufficient:
             continue
-        minimum = min(ACTION_SEVERITY[action] for action in sufficient)
+        minimum = 0 if pressure <= 1e-9 else min(ACTION_SEVERITY[action] for action in sufficient)
         chosen = ACTION_SEVERITY.get(str(row.get("action", "")), minimum)
         excess_values.append(float(max(0, chosen - minimum)))
     return (
@@ -168,7 +178,8 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
     constraints = env.scenario.get("defense_constraints", {})
     budget = float(constraints.get("business_budget", 5.0))
     max_high = int(constraints.get("max_high_impact_actions", 1))
-    correct_intent = _top_belief(env.history) == env.true_objective
+    attack_present = bool(env.hidden_world.attack_present)
+    correct_intent = attack_present and _top_belief(env.history) == env.true_objective
     false_containment_rate, excess_severity, false_containment_count = _response_safety_metrics(env)
     overresponse = bool(
         env.business_cost > budget
@@ -211,6 +222,8 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
     ]
     first_effective_time = min(effective_times, default=env.max_steps)
     decision_delay_steps = max(0, first_effective_time - first_actionable_time)
+    if not attack_present:
+        decision_delay_steps = 0
     delay = decision_delay_steps / max(1, env.max_steps)
     business_reward = (
         -2.0 * float(overresponse)
@@ -219,9 +232,12 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
         if variant.business_aware_reward
         else 0.0
     )
+    complete = bool(env.episode_done or env.t >= env.max_steps)
+    task_success = bool(complete and env.attack_mitigated) if attack_present else bool(
+        env.t >= env.max_steps and false_containment_count == 0 and env.business_cost <= budget
+    )
     base_reward = (
-        2.0 * float(correct_intent)
-        + 3.0 * float(env.attack_mitigated)
+        3.0 * float(task_success)
         - 4.0 * float(env.attack_success)
         - 0.05 * delay
         + business_reward
@@ -237,7 +253,8 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
         - 0.75 * float(trust["claim_trust_brier"])
         - 0.5 * float(invalid_state_ops)
     )
-    probe_reward = 0.75 * float(probe_yield)
+    # Evidence use is a diagnostic, not a causal benefit or a free probe bonus.
+    probe_reward = 0.0
     verification_cost_reward = -0.1 * float(env.verification_cost)
     reward = base_reward
     if variant.state_layer:
@@ -247,23 +264,35 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
     if variant.passive_verification or variant.active_probing:
         reward += verification_cost_reward
     safe_success = bool(
-        correct_intent
-        and env.attack_mitigated
+        task_success
         and not overresponse
         and memory["false_promoted_count"] == 0.0
     )
     return {
         "reward": float(reward),
+        "environment_revision": AEP_ENV_REVISION,
+        "metric_revision": AEP_METRIC_REVISION,
+        "task_success": task_success,
+        "trajectory_complete": complete,
+        "unresolved_probe_count": sum(row.get('status') == 'pending' for row in env.public_probe_state),
+        "attack_present": attack_present,
+        "intent_applicable": attack_present,
+        "delay_applicable": attack_present,
         "safe_success": safe_success,
         "correct_intent": bool(correct_intent),
         "attack_mitigated": bool(env.attack_mitigated),
         "attack_success": bool(env.attack_success),
         "business_cost": float(env.business_cost),
         "verification_cost": float(env.verification_cost),
+        "invalid_tool_cost": float(getattr(env, 'invalid_tool_cost', 0.0)),
+        "valid_verification_cost": float(env.verification_cost - getattr(env, 'invalid_tool_cost', 0.0)),
         "overresponse": overresponse,
         "active_probe_count": int(active_probe_count),
         "useful_active_probe_count": int(useful_probe_count),
         "probe_yield": float(probe_yield),
+        "probe_yield_is_causal": False,
+        "probe_evidence_use_rate": float(probe_yield),
+        "probe_grounded_authorizations": int(probe_grounded_action_revisions),
         "probe_result_availability_rate": float(probe_result_availability),
         "probe_grounded_state_updates": int(probe_grounded_state_updates),
         "probe_grounded_action_revisions": int(probe_grounded_action_revisions),
@@ -273,7 +302,7 @@ def score_trajectory_v2(env: Any) -> dict[str, Any]:
         "business_reward_component": float(business_reward),
         "state_reward_enabled": bool(variant.state_layer),
         "state_reward_component": float(state_reward if variant.state_layer else 0.0),
-        "active_probe_reward_enabled": bool(variant.active_probing),
+        "active_probe_reward_enabled": False,
         "active_probe_reward_component": float(
             probe_reward if variant.active_probing else 0.0
         ),

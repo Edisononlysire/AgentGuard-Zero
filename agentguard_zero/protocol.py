@@ -2,6 +2,8 @@
 
 TMCD_PROTOCOL_VERSION = "tmcd-v2"
 TMCD_RELEASE_REVISION = "tmcd-v2.4.2-20260716"
+AEP_ENV_REVISION = "aep-env-20260908-v1"
+AEP_METRIC_REVISION = "aep-metrics-20260908-v1"
 
 TASK_FAMILY_MAP = {
     "T1": "active_probe_ambiguity",

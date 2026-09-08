@@ -90,8 +90,8 @@ def recovery_core_components(
         score.get("poison_success", score.get("poison_activation", False))
     )
     return {
-        "mitigation": cfg.mitigation_reward
-        * float(bool(score.get("attack_mitigated", False))),
+        "task_success": cfg.mitigation_reward
+        * float(bool(score.get("task_success", score.get("attack_mitigated", False)))),
         "safe_success": cfg.safe_success_reward
         * float(bool(score.get("safe_success", False))),
         "attack_success": cfg.attack_success_penalty
@@ -139,10 +139,13 @@ def raw_safe_utility(
             / max(1.0, float(max_steps)),
         ),
     )
-    delay = min(1.0, max(0.0, float(steps) / max(1.0, float(max_steps))))
+    delay = min(1.0, max(0.0, float(score.get('delay', float(steps) / max(1.0, float(max_steps))))))
+    outcome_reward = (
+        0.55 * float(bool(score['task_success']))
+        if 'metric_revision' in score else 0.35 * attack_mitigation + 0.20 * intent_accuracy
+    )
     return float(
-        0.35 * attack_mitigation
-        + 0.20 * intent_accuracy
+        outcome_reward
         - 0.20 * business_cost
         - 0.15 * overresponse
         - 0.05 * verification_cost
@@ -178,7 +181,7 @@ def core_utility_manifest(
 ) -> dict[str, Any]:
     cfg = config or RecoveryCoreUtilityConfig()
     return {
-        "name": "recovery_core_utility_v1",
+        "name": "aep_outcome_utility_20260908_v1",
         "config": asdict(cfg),
         "teacher_shaping_rule": "absolute_total_at_most_teacher_shaping_cap",
     }

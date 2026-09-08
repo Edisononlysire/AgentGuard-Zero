@@ -441,6 +441,8 @@ def _task_id(env: Any) -> str:
 
 
 def _terminal(env: Any) -> bool:
+    if hasattr(env, 'episode_done'):
+        return bool(env.episode_done)
     return bool(env.t >= env.max_steps or env.attack_mitigated or env.attack_success)
 
 
@@ -629,6 +631,8 @@ def _teacher_regret_metrics(
 def run(args: argparse.Namespace) -> int:
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite {args.output}")
+    if args.post_mitigation_audit_step:
+        raise ValueError('legacy post-terminal audit is not supported by the revised environment')
     information_intervention = bool(
         args.probe_counterfactual != "none"
         or args.memory_counterfactual != "none"
@@ -1370,6 +1374,11 @@ def run(args: argparse.Namespace) -> int:
                         for counter in (totals, task_totals):
                             counter["scenario_count"] += 1
                             counter["safe_success_sum"] += int(score.get("safe_success", False))
+                            counter['task_success_sum'] += int(score.get('task_success', False))
+                            counter['attack_scenario_count'] += int(score.get('attack_present', True))
+                            counter['betrayal_target_count'] += int(score.get('betrayal_target_count', 0))
+                            counter['betrayal_detection_count'] += int(score.get('betrayal_detection_count', 0))
+                            counter['invalid_tool_cost_sum'] += float(score.get('invalid_tool_cost', 0.0))
                             counter["attack_mitigation_sum"] += int(
                                 score.get("attack_mitigated", False)
                             )
@@ -1451,11 +1460,19 @@ def run(args: argparse.Namespace) -> int:
             live = next_live
 
     def terminal_metrics(counter: dict[str, float]) -> dict[str, Any]:
+        from agentguard_zero.protocol import AEP_ENV_REVISION, AEP_METRIC_REVISION
         scenarios = max(1.0, counter.get("scenario_count", 0.0))
         return {
+            'environment_revision': AEP_ENV_REVISION,
+            'metric_revision': AEP_METRIC_REVISION,
+            'task_success': counter.get('task_success_sum', 0.0) / scenarios,
+            'attack_scenario_count': int(counter.get('attack_scenario_count', 0)),
+            'betrayal_target_count': int(counter.get('betrayal_target_count', 0)),
+            'invalid_tool_cost': counter.get('invalid_tool_cost_sum', 0.0) / scenarios,
+            'probe_yield_is_causal': False,
             "scenario_count": int(counter.get("scenario_count", 0.0)),
             "safe_success": counter.get("safe_success_sum", 0.0) / scenarios,
-            "attack_mitigation": counter.get("attack_mitigation_sum", 0.0) / scenarios,
+            "attack_mitigation": counter.get("attack_mitigation_sum", 0.0) / counter['attack_scenario_count'] if counter.get('attack_scenario_count') else None,
             "probe_yield": counter.get("probe_yield_sum", 0.0) / scenarios,
             "probe_result_availability": counter.get(
                 "probe_result_availability_sum", 0.0
@@ -1482,8 +1499,7 @@ def run(args: argparse.Namespace) -> int:
             "business_cost": counter.get("business_cost_sum", 0.0) / scenarios,
             "verification_cost": counter.get("verification_cost_sum", 0.0)
             / scenarios,
-            "betrayal_detection": counter.get("betrayal_detection_sum", 0.0)
-            / scenarios,
+            "betrayal_detection": counter.get('betrayal_detection_count', 0.0) / counter['betrayal_target_count'] if counter.get('betrayal_target_count') else None,
             "poison_success": counter.get("poison_success_sum", 0.0)
             / scenarios,
         }
@@ -1577,11 +1593,7 @@ def run(args: argparse.Namespace) -> int:
     metrics["t1_probe_yield"] = float(
         (metrics["by_task_terminal"].get("T1") or {}).get("probe_yield", 0.0)
     )
-    metrics["t2_betrayal_detection"] = float(
-        (metrics["by_task_terminal"].get("T2") or {}).get(
-            "betrayal_detection", 0.0
-        )
-    )
+    metrics["t2_betrayal_detection"] = (metrics["by_task_terminal"].get("T2") or {}).get("betrayal_detection")
     metrics["t3_poison_success"] = float(
         (metrics["by_task_terminal"].get("T3") or {}).get(
             "poison_success", 0.0
@@ -1716,28 +1728,56 @@ def merge(args: argparse.Namespace) -> int:
         "betrayal_detection",
         "poison_success",
     )
+    revisions = {shard['metrics'].get('metric_revision') for shard in shards}
+    environment_revisions = {shard['metrics'].get('environment_revision') for shard in shards}
+    if len(revisions) != 1 or len(environment_revisions) != 1:
+        raise RuntimeError('evaluation shard metric/environment revision mismatch')
+    revised = next(iter(revisions)) is not None
+    if revised:
+        terminal_keys += ('task_success', 'invalid_tool_cost')
+    applicable_populations = {
+        'attack_mitigation': 'attack_scenario_count',
+        'betrayal_detection': 'betrayal_target_count',
+    } if revised else {}
+
+    def accumulate(counter, values):
+        count = int(values['scenario_count'])
+        counter['scenario_count'] += count
+        for population in applicable_populations.values():
+            counter[population] += int(values[population])
+        for key in terminal_keys:
+            population = int(values[applicable_populations[key]]) if key in applicable_populations else count
+            if population:
+                value = values.get(key, 0.0)
+                if value is None:
+                    raise ValueError(f'missing applicable shard metric: {key}')
+                counter[f'{key}_sum'] += float(value) * population
+
     for shard in shards:
         metrics = shard["metrics"]
-        scenarios = int(metrics["scenario_count"])
-        terminal_sums["scenario_count"] += scenarios
-        for key in terminal_keys:
-            terminal_sums[f"{key}_sum"] += float(metrics.get(key, 0.0)) * scenarios
+        accumulate(terminal_sums, metrics)
         for task, values in metrics.get("by_task_terminal", {}).items():
             counter = by_task.setdefault(task, defaultdict(float))
-            count = int(values["scenario_count"])
-            counter["scenario_count"] += count
-            for key in terminal_keys:
-                counter[f"{key}_sum"] += float(values.get(key, 0.0)) * count
+            accumulate(counter, values)
 
     def pack(counter: dict[str, float]) -> dict[str, Any]:
         count = max(1.0, counter.get("scenario_count", 0.0))
-        return {
+        result = {
             "scenario_count": int(counter.get("scenario_count", 0.0)),
             **{
                 key: counter.get(f"{key}_sum", 0.0) / count
                 for key in terminal_keys
             },
         }
+        if revised:
+            result.update(metric_revision=next(iter(revisions)),
+                          environment_revision=next(iter(environment_revisions)),
+                          probe_yield_is_causal=False)
+            for key, population in applicable_populations.items():
+                denominator = counter.get(population, 0)
+                result[population] = int(denominator)
+                result[key] = counter.get(f'{key}_sum', 0.0) / denominator if denominator else None
+        return result
 
     action = summarize_candidate_traces(traces)
     actionable = [row for row in traces if bool(row.get("teacher_actionable", False))]
@@ -1838,11 +1878,7 @@ def merge(args: argparse.Namespace) -> int:
     metrics["t1_probe_yield"] = float(
         (metrics["by_task_terminal"].get("T1") or {}).get("probe_yield", 0.0)
     )
-    metrics["t2_betrayal_detection"] = float(
-        (metrics["by_task_terminal"].get("T2") or {}).get(
-            "betrayal_detection", 0.0
-        )
-    )
+    metrics["t2_betrayal_detection"] = (metrics["by_task_terminal"].get("T2") or {}).get("betrayal_detection")
     metrics["t3_poison_success"] = float(
         (metrics["by_task_terminal"].get("T3") or {}).get(
             "poison_success", 0.0

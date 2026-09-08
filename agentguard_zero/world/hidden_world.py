@@ -72,6 +72,9 @@ class HiddenWorld:
 
     def __init__(self, scenario: dict[str, Any], *, horizon: int) -> None:
         attack = scenario.get("true_attack", {})
+        self.attack_present = attack.get("present", True)
+        if not isinstance(self.attack_present, bool):
+            raise ValueError("true_attack.present must be a boolean")
         self.true_objective = str(attack.get("objective", "unknown"))
         self.entry = str(attack.get("entry", "unknown"))
         self.target = str(attack.get("target", "unknown"))
@@ -83,6 +86,8 @@ class HiddenWorld:
             0.05,
             min(1.0, float(attack.get("initial_pressure", 1.0))),
         )
+        if not self.attack_present:
+            self.attack_pressure = 0.0
         self.mitigated = False
         self.succeeded = False
         self.response_history: list[dict[str, Any]] = []
@@ -97,6 +102,7 @@ class HiddenWorld:
     def snapshot(self) -> dict[str, Any]:
         return {
             "true_objective": self.true_objective,
+            "attack_present": self.attack_present,
             "entry": self.entry,
             "target": self.target,
             "phase_index": self.phase_index,
@@ -115,23 +121,25 @@ class HiddenWorld:
         target_matches: bool,
         time: int,
     ) -> None:
+        # Belief is an intent diagnostic only; it cannot change physical efficacy.
         strength = float(MITIGATION_STRENGTH.get(str(action), 0.0))
         phase_compatibility = float(
             PHASE_COMPATIBILITY.get(str(action), {}).get(self.current_phase, 1.0)
         )
         effective = (
             strength * phase_compatibility
-            if belief_matches and target_matches
+            if self.attack_present and target_matches
             else 0.0
         )
         pressure_before = float(self.attack_pressure)
         self.attack_pressure = max(0.0, self.attack_pressure - effective)
-        self.mitigated = self.attack_pressure <= 1e-6
+        self.mitigated = self.attack_present and not self.succeeded and self.attack_pressure <= 1e-6
         self.response_history.append(
             {
                 "time": int(time),
                 "action": str(action),
                 "belief_matches": bool(belief_matches),
+                "attack_present": self.attack_present,
                 "target_matches": bool(target_matches),
                 "phase": self.current_phase,
                 "phase_compatibility": phase_compatibility,
@@ -143,7 +151,7 @@ class HiddenWorld:
         )
 
     def advance_attack(self) -> None:
-        if self.mitigated or self.succeeded:
+        if not self.attack_present or self.mitigated or self.succeeded:
             return
         self.ticks += 1
         if self.ticks % self.phase_duration:

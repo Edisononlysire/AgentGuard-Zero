@@ -1391,6 +1391,10 @@ def _simulate_one_step(env: Any, candidate: ActionCandidate) -> Any | None:
 
 def teacher_rollout_shaping(env: Any) -> float:
     score = score_trajectory_v2(env)
+    if score.get('metric_revision'):
+        # The legacy teacher must not reintroduce probe/reference bonuses.
+        # Its lifecycle labels and search are still pending the G2 replacement.
+        return 0.0
     pressure = float(getattr(env.hidden_world, "attack_pressure", 1.0))
     pressure_reduction = max(0.0, min(1.0, 1.0 - pressure))
     probe_information = float(
@@ -1699,9 +1703,8 @@ class PublicStateRobustTeacher:
             completed = [
                 world
                 for world in current
-                if world.t >= world.max_steps
-                or world.attack_mitigated
-                or world.attack_success
+                if bool(getattr(world, 'episode_done',
+                                world.t >= world.max_steps or world.attack_mitigated or world.attack_success))
             ]
             live = [world for world in current if world not in completed]
             if not live:

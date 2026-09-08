@@ -1572,6 +1572,20 @@ def summarize(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[s
         }
         for task, entries in sorted(task_groups.items())
     }
+    if any(item['score'].get('metric_revision') for item in results):
+        from agentguard_zero.evaluation.outcomes import aggregate_outcomes
+        outcomes = aggregate_outcomes(item['score'] for item in results)
+        summary['outcomes_vnext'] = outcomes
+        summary['metric_revision'] = outcomes['metric_revision']
+        summary['task_success_rate'] = outcomes['task_success_rate']
+        summary['attack_mitigation'] = outcomes['attack_mitigation_rate']
+        summary['intent_accuracy'] = outcomes['intent_accuracy']
+        summary['betrayal_detection'] = outcomes['betrayal_detection_rate']
+        summary['probe_yield_is_causal'] = False
+        for task, entries in task_groups.items():
+            task_outcomes = aggregate_outcomes(item['score'] for item in entries)
+            summary['task_metrics'][task]['outcomes_vnext'] = task_outcomes
+            summary['task_metrics'][task]['betrayal_detection'] = task_outcomes['betrayal_detection_rate']
     return summary
 
 
@@ -1586,12 +1600,12 @@ def write_outputs(results: list[dict[str, Any]], summary: dict[str, Any], output
         f.write("| System | Safe Utility | Attack Mitigation | Betrayal Detection | Poison Success | Overresponse | Business Cost |\n")
         f.write("|---|---:|---:|---:|---:|---:|---:|\n")
         betrayal = summary.get("betrayal_detection")
-        betrayal_text = "" if isinstance(betrayal, float) and math.isnan(betrayal) else f"{float(betrayal):.6f}"
+        betrayal_text = "N/A" if betrayal is None or isinstance(betrayal, float) and math.isnan(betrayal) else f"{float(betrayal):.6f}"
         f.write(
             "| {system} | {safe:.6f} | {mit:.6f} | {betrayal} | {poison:.6f} | {over:.6f} | {cost:.6f} |\n".format(
                 system=summary.get("system_display", summary.get("system", "")),
                 safe=summary.get("safe_utility", 0.0),
-                mit=summary.get("attack_mitigation", 0.0),
+                mit=summary.get("attack_mitigation") if summary.get("attack_mitigation") is not None else math.nan,
                 betrayal=betrayal_text,
                 poison=summary.get("poison_success", 0.0),
                 over=summary.get("overresponse_rate", 0.0),
